@@ -1,5 +1,5 @@
 package com.kingsman.tanpurakings
-import androidx.constraintlayout.widget.ConstraintLayout
+
 import android.content.Context
 import android.media.SoundPool
 import android.os.Bundle
@@ -10,24 +10,39 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.core.view.WindowCompat
 
 // ------------------------------
@@ -49,7 +64,7 @@ object AudioManager {
         if (isInitialized) return
         // Create a SoundPool that supports up to 3 simultaneous streams.
         soundPool = SoundPool.Builder().setMaxStreams(3).build()
-        // List of note filenames (without extension); e.g., "c", "csharp", etc.
+        // List of note filenames (without extension); for keys like "C#" the file name is "csharp"
         val keys = listOf("c", "csharp", "d", "dsharp", "e", "f", "fsharp", "g", "gsharp", "a", "asharp", "b")
         for (key in keys) {
             try {
@@ -65,8 +80,7 @@ object AudioManager {
     }
 
     fun playNote(noteName: String, volume: Float) {
-        // Limit to 3 active notes.
-        if (activeStreamIds.size >= 3) return
+        if (activeStreamIds.size >= 3) return  // Limit to 3 active notes.
         // Convert note name: e.g., "C#" becomes "csharp"
         val fileKey = noteName.lowercase().replace("#", "sharp")
         val soundId = noteSoundIds[fileKey] ?: return
@@ -134,21 +148,23 @@ fun PianoView(
     activeNoteVolumes: MutableState<Map<String, Float>>,
     masterVolume: Float
 ) {
-    val context = LocalContext.current
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
             .height(200.dp)
             .background(Color.LightGray)
     ) {
-        // White keys row
+        val totalWidth = maxWidth
         val whiteKeys = octaveKeys.filter { !it.isSharp }
         val whiteKeyCount = whiteKeys.size
+        val whiteKeyWidth = totalWidth / whiteKeyCount
+
+        // Draw white keys
         Row(modifier = Modifier.fillMaxSize()) {
             whiteKeys.forEach { key ->
                 Box(
                     modifier = Modifier
-                        .weight(1f)
+                        .width(whiteKeyWidth)
                         .fillMaxHeight()
                         .background(if (activeNotes.value.contains(key.name)) Color.Yellow else Color.White)
                         .border(1.dp, Color.Black)
@@ -170,41 +186,42 @@ fun PianoView(
                 }
             }
         }
-        // Black keys overlay
-        Box(modifier = Modifier.fillMaxSize()) {
-            // Approximate positions (adjust if needed)
-            val keyPositions = mapOf(
-                "C#" to 0.66f,
-                "D#" to 1.66f,
-                "F#" to 3.66f,
-                "G#" to 4.66f,
-                "A#" to 5.66f
-            )
-            octaveKeys.filter { it.isSharp }.forEach { key ->
-                val posMultiplier = keyPositions[key.name] ?: 0f
-                Box(
-                    modifier = Modifier
-                        .height(120.dp)
-                        .width(30.dp)
-                        .offset(x = ((posMultiplier / whiteKeyCount) * context.resources.displayMetrics.widthPixels).dp)
-                        .background(if (activeNotes.value.contains(key.name)) Color.Yellow else Color.Black)
-                        .border(1.dp, Color.Black)
-                        .clickable {
-                            if (activeNotes.value.contains(key.name)) {
-                                AudioManager.stopNote(key.name)
-                                activeNotes.value = activeNotes.value - key.name
-                                activeNoteVolumes.value = activeNoteVolumes.value.toMutableMap().apply { remove(key.name) }
-                            } else {
-                                if (activeNotes.value.size >= 3) return@clickable
-                                activeNotes.value = activeNotes.value + key.name
-                                activeNoteVolumes.value = activeNoteVolumes.value.toMutableMap().apply { put(key.name, 1f) }
-                                AudioManager.playNote(key.name, masterVolume)
-                            }
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(text = key.name, color = Color.White, fontSize = 10.sp)
-                }
+
+        // Draw black keys (overlay)
+        // Define positions relative to white key width:
+        val blackKeyPositions = mapOf(
+            "C#" to 0.75f,
+            "D#" to 1.75f,
+            "F#" to 3.75f,
+            "G#" to 4.75f,
+            "A#" to 5.75f
+        )
+        octaveKeys.filter { it.isSharp }.forEach { key ->
+            val posMultiplier = blackKeyPositions[key.name] ?: 0f
+            val blackKeyWidth = whiteKeyWidth * 0.6f
+            val offsetX = whiteKeyWidth * posMultiplier - (blackKeyWidth / 2)
+            Box(
+                modifier = Modifier
+                    .offset(x = offsetX)
+                    .width(blackKeyWidth)
+                    .height(120.dp)
+                    .background(if (activeNotes.value.contains(key.name)) Color.Yellow else Color.Black)
+                    .border(1.dp, Color.Black)
+                    .clickable {
+                        if (activeNotes.value.contains(key.name)) {
+                            AudioManager.stopNote(key.name)
+                            activeNotes.value = activeNotes.value - key.name
+                            activeNoteVolumes.value = activeNoteVolumes.value.toMutableMap().apply { remove(key.name) }
+                        } else {
+                            if (activeNotes.value.size >= 3) return@clickable
+                            activeNotes.value = activeNotes.value + key.name
+                            activeNoteVolumes.value = activeNoteVolumes.value.toMutableMap().apply { put(key.name, 1f) }
+                            AudioManager.playNote(key.name, masterVolume)
+                        }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(text = key.name, color = Color.White, fontSize = 10.sp)
             }
         }
     }
@@ -218,7 +235,7 @@ fun ActiveNotesVolumeView(activeNoteVolumes: MutableState<Map<String, Float>>) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xAA000000), shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+            .background(Color(0xAA000000), shape = RoundedCornerShape(8.dp))
             .padding(8.dp)
     ) {
         Text("Active Notes Volume", color = Color.White, fontSize = 18.sp)
@@ -236,7 +253,8 @@ fun ActiveNotesVolumeView(activeNoteVolumes: MutableState<Map<String, Float>>) {
                     Slider(
                         value = volume,
                         onValueChange = { newVolume ->
-                            activeNoteVolumes.value = activeNoteVolumes.value.toMutableMap().apply { put(note, newVolume) }
+                            activeNoteVolumes.value =
+                                activeNoteVolumes.value.toMutableMap().apply { put(note, newVolume) }
                             AudioManager.updateVolume(note, newVolume)
                         },
                         valueRange = 0f..1f,
@@ -265,7 +283,7 @@ fun EffectsPanel(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xAA000000), shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+            .background(Color(0xAA000000), shape = RoundedCornerShape(8.dp))
             .padding(8.dp)
     ) {
         Text("Effects", color = Color.White, fontSize = 18.sp)
@@ -310,7 +328,7 @@ fun MasterVolumeView(masterVolume: MutableState<Float>) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xAA000000), shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+            .background(Color(0xAA000000), shape = RoundedCornerShape(8.dp))
             .padding(8.dp)
     ) {
         Text("Master Volume", color = Color.White, fontSize = 18.sp)
@@ -408,7 +426,6 @@ fun TanpuraKingsApp() {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Enable edge-to-edge display.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent { TanpuraKingsApp() }
     }
