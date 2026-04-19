@@ -1,15 +1,19 @@
 package com.kingsman.tanpurakings
 
 import android.content.Context
+import android.content.Intent
 import android.media.AudioAttributes
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.media.SoundPool
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -44,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
@@ -149,6 +154,7 @@ object AudioManager {
                             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                             .build()
                     )
+                    setWakeMode(ctx, PowerManager.PARTIAL_WAKE_LOCK)
                     setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
                     afd.close()
                     setVolume(volume, volume)
@@ -513,6 +519,37 @@ fun SliderWithLabel(
 }
 
 // ------------------------------
+// AudioOutputButton — opens the system audio output picker so the user
+// can route playback to a Bluetooth speaker, wired headset, etc.
+// ------------------------------
+@Composable
+fun AudioOutputButton() {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier
+            .background(Color(0xAA000000), shape = RoundedCornerShape(20.dp))
+            .clickable {
+                val panel = Intent("com.android.settings.panel.action.MEDIA_OUTPUT").apply {
+                    putExtra("android.provider.extra.PACKAGE_NAME", context.packageName)
+                }
+                runCatching { context.startActivity(panel) }.onFailure {
+                    runCatching {
+                        context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+                    }
+                }
+            }
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "\uD83D\uDD0A  Audio Output",
+            color = Color.White,
+            fontSize = 14.sp
+        )
+    }
+}
+
+// ------------------------------
 // MasterVolumeView
 // ------------------------------
 @Composable
@@ -579,8 +616,20 @@ fun TanpuraKingsApp() {
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.height(28.dp))
-        Text("Tanpura Kings", fontSize = 22.sp, color = Color.White )
+        Spacer(modifier = Modifier.height(20.dp))
+        Image(
+            painter = painterResource(id = R.drawable.app_logo),
+            contentDescription = "Tanpura Kings logo",
+            modifier = Modifier.width(96.dp).height(96.dp)
+        )
+        Text(
+            "Tanpura Kings",
+            fontSize = 24.sp,
+            color = Color.White,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        AudioOutputButton()
         Spacer(modifier = Modifier.height(16.dp))
         PianoView(activeNotes, activeNoteVolumes, masterVolume.value)
         Spacer(modifier = Modifier.height(16.dp))

@@ -14,11 +14,18 @@ struct ContentView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                Spacer().frame(height: 28)
+                Spacer().frame(height: 20)
+
+                Image("Logo")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 96, height: 96)
 
                 Text("Tanpura Kings")
-                    .font(.system(size: 22))
+                    .font(.system(size: 24, weight: .semibold))
                     .foregroundColor(.white)
+
+                AudioOutputButton()
 
                 PianoView(
                     activeNotes: $activeNotes,
@@ -65,9 +72,6 @@ struct ContentView: View {
         )
         .onAppear {
             AudioManager.shared.initializeIfNeeded()
-        }
-        .onDisappear {
-            AudioManager.shared.release()
         }
         .onChange(of: masterVolume) { _, newValue in
             AudioManager.shared.updateMasterVolume(newValue)
