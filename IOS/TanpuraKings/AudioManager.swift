@@ -148,13 +148,21 @@ final class AudioManager: NSObject {
             guard let self = self, self.isInitialized else { return }
             do {
                 try AVAudioSession.sharedInstance().setActive(true)
+
+                // After a route/config change the engine is implicitly stopped and
+                // every AVAudioPlayerNode has lost its scheduled file. We must stop
+                // each player, restart the engine, then re-schedule + re-play.
+                for (_, note) in self.activeNotes where !note.isStopping {
+                    note.player.stop()
+                }
+
                 if !self.engine.isRunning {
                     try self.engine.start()
                 }
+
                 for (_, note) in self.activeNotes where !note.isStopping {
-                    if !note.player.isPlaying {
-                        note.player.play()
-                    }
+                    self.scheduleLooping(for: note)
+                    note.player.play()
                 }
             } catch {
                 print("Restart error: \(error)")
