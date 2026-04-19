@@ -1,7 +1,10 @@
 package com.kingsman.tanpurakings
 
 import android.content.Context
+import android.media.AudioAttributes
 import android.media.SoundPool
+import android.media.audiofx.EnvironmentalReverb
+import android.media.audiofx.Equalizer
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -29,6 +32,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +48,17 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
+import java.util.Locale
+import kotlin.math.pow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+
+private const val MAX_ACTIVE_NOTES = 3
 
 // ------------------------------
 // AudioManager: Handles Audio Playback and Global Effects
@@ -52,70 +67,176 @@ object AudioManager {
     private lateinit var soundPool: SoundPool
     private val noteSoundIds = mutableMapOf<String, Int>()
     private val activeStreamIds = mutableMapOf<String, Int>()
+    private val noteVolumes = mutableMapOf<String, Float>()
+    private val echoJobs = mutableMapOf<String, Job>()
     var isInitialized = false
 
-    // Global effect parameters (for logging only)
-    var bass: Float = 0f
-    var treble: Float = 0f
-    var reverbMix: Float = 0f
-    var echoMix: Float = 0f
+    private var equalizer: Equalizer? = null
+    private var reverb: EnvironmentalReverb? = null
+    private var coroutineScope: CoroutineScope? = null
+
+    // Effect parameters — updated via updateEffects()
+    private var fineTuneCents: Float = 0f
+    private var echoMix: Float = 0f
+    private var echoDelayMs: Float = 300f
+    private var delayMix: Float = 0f
+    private var delayTimeMs: Float = 500f
 
     fun init(context: Context) {
         if (isInitialized) return
-        // Create a SoundPool that supports up to 3 simultaneous streams.
-        soundPool = SoundPool.Builder().setMaxStreams(3).build()
-        // List of note filenames (without extension); for keys like "C#" the file name is "csharp"
+        coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+        soundPool = SoundPool.Builder()
+            .setMaxStreams(MAX_ACTIVE_NOTES)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build()
+            )
+            .build()
+
         val keys = listOf("c", "csharp", "d", "dsharp", "e", "f", "fsharp", "g", "gsharp", "a", "asharp", "b")
         for (key in keys) {
             try {
                 val afd = context.assets.openFd("Audio/$key.mp3")
-                val soundId = soundPool.load(afd, 1)
-                noteSoundIds[key] = soundId
+                noteSoundIds[key] = soundPool.load(afd, 1)
             } catch (e: Exception) {
                 Log.e("AudioManager", "Error loading sound for key: $key", e)
             }
         }
+
+        val sessionId = soundPool.audioSessionId
+        try {
+            equalizer = Equalizer(0, sessionId).apply { enabled = true }
+            reverb = EnvironmentalReverb(0, sessionId).apply { enabled = true }
+        } catch (e: Exception) {
+            Log.w("AudioManager", "Audio effects unavailable: ${e.message}")
+        }
+
         isInitialized = true
-        Log.d("AudioManager", "AudioManager initialized")
+        Log.d("AudioManager", "AudioManager initialized, session=$sessionId")
     }
 
-    fun playNote(noteName: String, volume: Float) {
-        if (activeStreamIds.size >= 3) return  // Limit to 3 active notes.
-        // Convert note name: e.g., "C#" becomes "csharp"
+    // Converts cents offset to a SoundPool rate multiplier (0.5–2.0).
+    private fun fineTuneRate(cents: Float): Float =
+        2.0.pow(cents / 1200.0).toFloat().coerceIn(0.5f, 2.0f)
+
+    fun playNote(noteName: String, masterVolume: Float, noteVolume: Float = 1f) {
+        if (activeStreamIds.size >= MAX_ACTIVE_NOTES) return
         val fileKey = noteName.lowercase().replace("#", "sharp")
         val soundId = noteSoundIds[fileKey] ?: return
-        val streamId = soundPool.play(soundId, volume, volume, 1, 0, 1f)
+        val effectiveVolume = (masterVolume * noteVolume).coerceIn(0f, 1f)
+        val rate = fineTuneRate(fineTuneCents)
+        val streamId = soundPool.play(soundId, effectiveVolume, effectiveVolume, 1, 0, rate)
         activeStreamIds[noteName] = streamId
-        Log.d("AudioManager", "Playing note $noteName with volume $volume")
+        noteVolumes[noteName] = noteVolume
+
+        if (echoMix > 0f || delayMix > 0f) {
+            scheduleEchoAndDelay(soundId, noteName, effectiveVolume, rate)
+        }
     }
 
-    fun updateVolume(noteName: String, volume: Float) {
+    private fun scheduleEchoAndDelay(soundId: Int, noteName: String, baseVolume: Float, rate: Float) {
+        echoJobs[noteName]?.cancel()
+        echoJobs[noteName] = coroutineScope?.launch {
+            // Delay effect: single repeat after delayTimeMs at reduced volume
+            if (delayMix > 0f) launch {
+                delay(delayTimeMs.toLong())
+                val vol = (baseVolume * delayMix).coerceIn(0f, 1f)
+                soundPool.play(soundId, vol, vol, 0, 0, rate)
+            }
+
+            // Echo effect: multiple repeats with exponential volume decay
+            if (echoMix > 0f) launch {
+                var echoVolume = baseVolume * echoMix
+                while (echoVolume > 0.02f && isActive) {
+                    delay(echoDelayMs.toLong())
+                    soundPool.play(soundId, echoVolume.coerceIn(0f, 1f), echoVolume.coerceIn(0f, 1f), 0, 0, rate)
+                    echoVolume *= 0.55f  // ~55% decay per repeat
+                }
+            }
+        }
+    }
+
+    fun updateNoteVolume(noteName: String, noteVolume: Float, masterVolume: Float) {
+        noteVolumes[noteName] = noteVolume
         val streamId = activeStreamIds[noteName] ?: return
-        soundPool.setVolume(streamId, volume, volume)
-        Log.d("AudioManager", "Updated volume for note $noteName to $volume")
+        val effectiveVolume = (masterVolume * noteVolume).coerceIn(0f, 1f)
+        soundPool.setVolume(streamId, effectiveVolume, effectiveVolume)
+    }
+
+    fun updateMasterVolume(masterVolume: Float) {
+        activeStreamIds.forEach { (noteName, streamId) ->
+            val noteVolume = noteVolumes[noteName] ?: 1f
+            val effectiveVolume = (masterVolume * noteVolume).coerceIn(0f, 1f)
+            soundPool.setVolume(streamId, effectiveVolume, effectiveVolume)
+        }
     }
 
     fun stopNote(noteName: String) {
-        val streamId = activeStreamIds[noteName] ?: return
+        echoJobs.remove(noteName)?.cancel()
+        val streamId = activeStreamIds.remove(noteName) ?: return
         soundPool.stop(streamId)
-        activeStreamIds.remove(noteName)
-        Log.d("AudioManager", "Stopped note $noteName")
+        noteVolumes.remove(noteName)
     }
 
     fun stopAllNotes() {
-        for (streamId in activeStreamIds.values) {
-            soundPool.stop(streamId)
-        }
+        echoJobs.values.forEach { it.cancel() }
+        echoJobs.clear()
+        activeStreamIds.values.forEach { soundPool.stop(it) }
         activeStreamIds.clear()
-        Log.d("AudioManager", "Stopped all notes")
+        noteVolumes.clear()
     }
 
-    fun updateEffects(bass: Float, treble: Float, reverbMix: Float, echoMix: Float) {
-        this.bass = bass
-        this.treble = treble
-        this.reverbMix = reverbMix
-        this.echoMix = echoMix
-        Log.d("AudioManager", "Effects updated: Bass=$bass, Treble=$treble, Reverb=$reverbMix, Echo=$echoMix")
+    fun updateEffects(
+        bass: Float,
+        treble: Float,
+        reverbMix: Float,
+        fineTune: Float,
+        echoMixVal: Float,
+        echoDelayVal: Float,
+        delayMixVal: Float,
+        delayTimeVal: Float
+    ) {
+        // Fine tune: update rate on all currently playing streams
+        if (fineTune != fineTuneCents) {
+            fineTuneCents = fineTune
+            val rate = fineTuneRate(fineTune)
+            activeStreamIds.values.forEach { soundPool.setRate(it, rate) }
+        }
+        echoMix = echoMixVal
+        echoDelayMs = echoDelayVal
+        delayMix = delayMixVal
+        delayTimeMs = delayTimeVal
+
+        try {
+            equalizer?.let { eq ->
+                val numBands = eq.numberOfBands.toInt()
+                if (numBands < 2) return@let
+                val maxMb = eq.bandLevelRange[1].toInt()
+                val bassMb = (bass / 20f * maxMb).toInt().coerceIn(-maxMb, maxMb).toShort()
+                val trebleMb = (treble / 20f * maxMb).toInt().coerceIn(-maxMb, maxMb).toShort()
+                for (band in 0 until numBands / 2) eq.setBandLevel(band.toShort(), bassMb)
+                for (band in numBands / 2 until numBands) eq.setBandLevel(band.toShort(), trebleMb)
+            }
+            reverb?.roomLevel = ((reverbMix / 100f) * 9000 - 9000).toInt().coerceIn(-9000, 0).toShort()
+        } catch (e: Exception) {
+            Log.w("AudioManager", "Failed to apply effects: ${e.message}")
+        }
+    }
+
+    fun release() {
+        stopAllNotes()
+        coroutineScope?.cancel()
+        coroutineScope = null
+        equalizer?.release()
+        reverb?.release()
+        equalizer = null
+        reverb = null
+        if (::soundPool.isInitialized) soundPool.release()
+        noteSoundIds.clear()
+        isInitialized = false
+        Log.d("AudioManager", "AudioManager released")
     }
 }
 
@@ -156,10 +277,8 @@ fun PianoView(
     ) {
         val totalWidth = maxWidth
         val whiteKeys = octaveKeys.filter { !it.isSharp }
-        val whiteKeyCount = whiteKeys.size
-        val whiteKeyWidth = totalWidth / whiteKeyCount
+        val whiteKeyWidth = totalWidth / whiteKeys.size
 
-        // Draw white keys
         Row(modifier = Modifier.fillMaxSize()) {
             whiteKeys.forEach { key ->
                 Box(
@@ -172,12 +291,12 @@ fun PianoView(
                             if (activeNotes.value.contains(key.name)) {
                                 AudioManager.stopNote(key.name)
                                 activeNotes.value = activeNotes.value - key.name
-                                activeNoteVolumes.value = activeNoteVolumes.value.toMutableMap().apply { remove(key.name) }
+                                activeNoteVolumes.value = activeNoteVolumes.value - key.name
                             } else {
-                                if (activeNotes.value.size >= 3) return@clickable
+                                if (activeNotes.value.size >= MAX_ACTIVE_NOTES) return@clickable
                                 activeNotes.value = activeNotes.value + key.name
-                                activeNoteVolumes.value = activeNoteVolumes.value.toMutableMap().apply { put(key.name, 1f) }
-                                AudioManager.playNote(key.name, masterVolume)
+                                activeNoteVolumes.value = activeNoteVolumes.value + (key.name to 1f)
+                                AudioManager.playNote(key.name, masterVolume, 1f)
                             }
                         },
                     contentAlignment = Alignment.Center
@@ -187,14 +306,8 @@ fun PianoView(
             }
         }
 
-        // Draw black keys (overlay)
-        // Define positions relative to white key width:
         val blackKeyPositions = mapOf(
-            "C#" to 0.75f,
-            "D#" to 1.75f,
-            "F#" to 3.75f,
-            "G#" to 4.75f,
-            "A#" to 5.75f
+            "C#" to 0.75f, "D#" to 1.75f, "F#" to 3.75f, "G#" to 4.75f, "A#" to 5.75f
         )
         octaveKeys.filter { it.isSharp }.forEach { key ->
             val posMultiplier = blackKeyPositions[key.name] ?: 0f
@@ -211,12 +324,12 @@ fun PianoView(
                         if (activeNotes.value.contains(key.name)) {
                             AudioManager.stopNote(key.name)
                             activeNotes.value = activeNotes.value - key.name
-                            activeNoteVolumes.value = activeNoteVolumes.value.toMutableMap().apply { remove(key.name) }
+                            activeNoteVolumes.value = activeNoteVolumes.value - key.name
                         } else {
-                            if (activeNotes.value.size >= 3) return@clickable
+                            if (activeNotes.value.size >= MAX_ACTIVE_NOTES) return@clickable
                             activeNotes.value = activeNotes.value + key.name
-                            activeNoteVolumes.value = activeNoteVolumes.value.toMutableMap().apply { put(key.name, 1f) }
-                            AudioManager.playNote(key.name, masterVolume)
+                            activeNoteVolumes.value = activeNoteVolumes.value + (key.name to 1f)
+                            AudioManager.playNote(key.name, masterVolume, 1f)
                         }
                     },
                 contentAlignment = Alignment.Center
@@ -231,7 +344,10 @@ fun PianoView(
 // Composable: ActiveNotesVolumeView
 // ------------------------------
 @Composable
-fun ActiveNotesVolumeView(activeNoteVolumes: MutableState<Map<String, Float>>) {
+fun ActiveNotesVolumeView(
+    activeNoteVolumes: MutableState<Map<String, Float>>,
+    masterVolume: Float
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -253,9 +369,8 @@ fun ActiveNotesVolumeView(activeNoteVolumes: MutableState<Map<String, Float>>) {
                     Slider(
                         value = volume,
                         onValueChange = { newVolume ->
-                            activeNoteVolumes.value =
-                                activeNoteVolumes.value.toMutableMap().apply { put(note, newVolume) }
-                            AudioManager.updateVolume(note, newVolume)
+                            activeNoteVolumes.value = activeNoteVolumes.value + (note to newVolume)
+                            AudioManager.updateNoteVolume(note, newVolume, masterVolume)
                         },
                         valueRange = 0f..1f,
                         modifier = Modifier.width(150.dp),
@@ -278,7 +393,11 @@ fun EffectsPanel(
     bass: MutableState<Float>,
     treble: MutableState<Float>,
     reverb: MutableState<Float>,
-    echo: MutableState<Float>
+    fineTune: MutableState<Float>,
+    echoMix: MutableState<Float>,
+    echoDelay: MutableState<Float>,
+    delayMix: MutableState<Float>,
+    delayTime: MutableState<Float>
 ) {
     Column(
         modifier = Modifier
@@ -286,12 +405,76 @@ fun EffectsPanel(
             .background(Color(0xAA000000), shape = RoundedCornerShape(8.dp))
             .padding(8.dp)
     ) {
-        Text("Effects", color = Color.White, fontSize = 18.sp)
+        Text("Effects", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+
+        EffectSectionHeader("Fine Tune")
+        SliderWithLabel(
+            label = "Pitch",
+            value = fineTune.value,
+            onValueChange = { fineTune.value = it },
+            valueRange = -100f..100f,
+            color = Color(0xFFFFD700),
+            formatter = { v -> "${v.toInt()} cents" }
+        )
+
+        EffectSectionHeader("Reverb")
+        SliderWithLabel(
+            label = "Mix",
+            value = reverb.value,
+            onValueChange = { reverb.value = it },
+            valueRange = 0f..100f,
+            color = Color.Magenta
+        )
+
+        EffectSectionHeader("Echo")
+        SliderWithLabel(
+            label = "Mix",
+            value = echoMix.value,
+            onValueChange = { echoMix.value = it },
+            valueRange = 0f..1f,
+            color = Color.Cyan
+        )
+        SliderWithLabel(
+            label = "Delay",
+            value = echoDelay.value,
+            onValueChange = { echoDelay.value = it },
+            valueRange = 50f..1000f,
+            color = Color.Cyan,
+            formatter = { v -> "${v.toInt()} ms" }
+        )
+
+        EffectSectionHeader("Delay")
+        SliderWithLabel(
+            label = "Mix",
+            value = delayMix.value,
+            onValueChange = { delayMix.value = it },
+            valueRange = 0f..1f,
+            color = Color(0xFFFFA500)
+        )
+        SliderWithLabel(
+            label = "Time",
+            value = delayTime.value,
+            onValueChange = { delayTime.value = it },
+            valueRange = 50f..2000f,
+            color = Color(0xFFFFA500),
+            formatter = { v -> "${v.toInt()} ms" }
+        )
+
+        EffectSectionHeader("EQ")
         SliderWithLabel("Bass", bass.value, { bass.value = it }, -20f..20f, Color.Blue)
         SliderWithLabel("Treble", treble.value, { treble.value = it }, -20f..20f, Color.Green)
-        SliderWithLabel("Reverb", reverb.value, { reverb.value = it }, 0f..100f, Color.Magenta)
-        SliderWithLabel("Echo", echo.value, { echo.value = it }, 0f..100f, Color.Cyan)
     }
+}
+
+@Composable
+private fun EffectSectionHeader(title: String) {
+    Text(
+        text = title,
+        color = Color(0xFFFFA500),
+        fontSize = 13.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
+    )
 }
 
 @Composable
@@ -300,13 +483,14 @@ fun SliderWithLabel(
     value: Float,
     onValueChange: (Float) -> Unit,
     valueRange: ClosedFloatingPointRange<Float>,
-    color: Color
+    color: Color,
+    formatter: (Float) -> String = { v -> String.format(Locale.getDefault(), "%.2f", v) }
 ) {
-    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+    Column(modifier = Modifier.padding(vertical = 2.dp)) {
         Row(modifier = Modifier.fillMaxWidth()) {
             Text(label, color = Color.White)
             Spacer(modifier = Modifier.weight(1f))
-            Text(String.format("%.2f", value), color = Color.White)
+            Text(formatter(value), color = Color(0xFFCCCCCC), fontSize = 13.sp)
         }
         Slider(
             value = value,
@@ -345,31 +529,11 @@ fun MasterVolumeView(masterVolume: MutableState<Float>) {
 }
 
 // ------------------------------
-// Composable: GradientBackground
-// ------------------------------
-@Composable
-fun GradientBackground() {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                brush = Brush.verticalGradient(
-                    colors = listOf(
-                        Color.Blue.copy(alpha = 0.6f),
-                        Color(0xFF800080).copy(alpha = 0.8f)
-                    )
-                )
-            )
-    )
-}
-
-// ------------------------------
 // Composable: TanpuraKingsApp (Main Screen)
 // ------------------------------
 @Composable
 fun TanpuraKingsApp() {
     val context = LocalContext.current
-    LaunchedEffect(Unit) { AudioManager.init(context) }
 
     val activeNotes = remember { mutableStateOf(setOf<String>()) }
     val activeNoteVolumes = remember { mutableStateOf(mapOf<String, Float>()) }
@@ -377,10 +541,31 @@ fun TanpuraKingsApp() {
     val bass = remember { mutableStateOf(0f) }
     val treble = remember { mutableStateOf(0f) }
     val reverb = remember { mutableStateOf(0f) }
-    val echo = remember { mutableStateOf(0f) }
+    val fineTune = remember { mutableStateOf(0f) }
+    val echoMix = remember { mutableStateOf(0f) }
+    val echoDelay = remember { mutableStateOf(300f) }
+    val delayMix = remember { mutableStateOf(0f) }
+    val delayTime = remember { mutableStateOf(500f) }
 
-    LaunchedEffect(bass.value, treble.value, reverb.value, echo.value) {
-        AudioManager.updateEffects(bass.value, treble.value, reverb.value, echo.value)
+    DisposableEffect(Unit) {
+        AudioManager.init(context)
+        onDispose { AudioManager.release() }
+    }
+
+    LaunchedEffect(masterVolume.value) {
+        AudioManager.updateMasterVolume(masterVolume.value)
+    }
+
+    LaunchedEffect(
+        bass.value, treble.value, reverb.value,
+        fineTune.value, echoMix.value, echoDelay.value,
+        delayMix.value, delayTime.value
+    ) {
+        AudioManager.updateEffects(
+            bass.value, treble.value, reverb.value,
+            fineTune.value, echoMix.value, echoDelay.value,
+            delayMix.value, delayTime.value
+        )
     }
 
     Column(
@@ -403,10 +588,10 @@ fun TanpuraKingsApp() {
         PianoView(activeNotes, activeNoteVolumes, masterVolume.value)
         Spacer(modifier = Modifier.height(16.dp))
         if (activeNoteVolumes.value.isNotEmpty()) {
-            ActiveNotesVolumeView(activeNoteVolumes)
+            ActiveNotesVolumeView(activeNoteVolumes, masterVolume.value)
             Spacer(modifier = Modifier.height(16.dp))
         }
-        EffectsPanel(bass, treble, reverb, echo)
+        EffectsPanel(bass, treble, reverb, fineTune, echoMix, echoDelay, delayMix, delayTime)
         Spacer(modifier = Modifier.height(16.dp))
         MasterVolumeView(masterVolume)
         Spacer(modifier = Modifier.height(16.dp))
