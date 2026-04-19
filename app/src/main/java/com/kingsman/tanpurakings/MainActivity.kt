@@ -117,7 +117,7 @@ object AudioManager {
         val soundId = noteSoundIds[fileKey] ?: return
         val effectiveVolume = (masterVolume * noteVolume).coerceIn(0f, 1f)
         val rate = fineTuneRate(fineTuneCents)
-        val streamId = soundPool.play(soundId, effectiveVolume, effectiveVolume, 1, 0, rate)
+        val streamId = soundPool.play(soundId, effectiveVolume, effectiveVolume, 1, -1, rate)
         activeStreamIds[noteName] = streamId
         noteVolumes[noteName] = noteVolume
 
