@@ -59,7 +59,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -193,20 +192,21 @@ object AudioManager {
                     if (reverbMix > 0f) launch {
                         val intervals = longArrayOf(17, 23, 31, 41, 53, 67, 83, 101, 127)
                         var vol = (volume * (reverbMix / 100f) * 0.75f).coerceAtMost(1f)
-                        for (ms in intervals) {
-                            delay(ms); if (!isActive) break
+                        var i = 0
+                        while (i < intervals.size && vol >= 0.02f) {
+                            delay(intervals[i++])
                             soundPool.play(soundId, vol, vol, 0, 0, pitch)
-                            vol *= 0.6f; if (vol < 0.02f) break
+                            vol *= 0.6f
                         }
                     }
                     if (delayMix > 0f) launch {
-                        delay(delayTimeMs.toLong()); if (!isActive) return@launch
+                        delay(delayTimeMs.toLong())
                         val vol = (volume * delayMix).coerceIn(0f, 1f)
                         soundPool.play(soundId, vol, vol, 0, 0, pitch)
                     }
                     if (echoMix > 0f) launch {
                         var vol = volume * echoMix
-                        while (vol > 0.02f && isActive) {
+                        while (vol > 0.02f) {
                             delay(echoDelayMs.toLong())
                             soundPool.play(soundId, vol.coerceIn(0f, 1f), vol.coerceIn(0f, 1f), 0, 0, pitch)
                             vol *= 0.55f
@@ -222,20 +222,24 @@ object AudioManager {
     private suspend fun crossfadeLoop(
         fileKey: String, noteName: String, volume: Float, durationMs: Long
     ) {
+        // delay() throws CancellationException when the job is cancelled — no isActive needed
         val waitBeforeFade = (durationMs - CROSSFADE_MS).coerceAtLeast(200L)
-        while (isActive) {
+        while (true) {
             delay(waitBeforeFade)
-            if (!isActive) break
 
-            val pitch      = fineTuneRate(fineTuneCents)
+            val pitch = fineTuneRate(fineTuneCents)
+
             val nextPlayer = buildPlayer(fileKey, 0f, pitch) ?: break
-            val curPlayer  = activePlayers[noteName] ?: run { nextPlayer.release(); break }
+
+            val curPlayer = activePlayers[noteName]
+            if (curPlayer == null) {
+                nextPlayer.release()
+                break
+            }
 
             nextPlayer.start()
-
             val stepMs = CROSSFADE_MS / CROSSFADE_STEPS
             for (step in 1..CROSSFADE_STEPS) {
-                if (!isActive) break
                 val alpha = step.toFloat() / CROSSFADE_STEPS
                 curPlayer.setVolume(volume * (1f - alpha), volume * (1f - alpha))
                 nextPlayer.setVolume(volume * alpha, volume * alpha)
@@ -245,7 +249,6 @@ object AudioManager {
             activePlayers[noteName] = nextPlayer
             runCatching { curPlayer.stop() }
             curPlayer.release()
-            // nextPlayer has been running for CROSSFADE_MS already, so timing stays aligned
         }
     }
 
@@ -576,7 +579,8 @@ fun TanpuraKingsApp() {
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Tanpura Kings", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Color.White)
+        Spacer(modifier = Modifier.height(28.dp))
+        Text("Tanpura Kings", fontSize = 22.sp, color = Color.White )
         Spacer(modifier = Modifier.height(16.dp))
         PianoView(activeNotes, activeNoteVolumes, masterVolume.value)
         Spacer(modifier = Modifier.height(16.dp))
