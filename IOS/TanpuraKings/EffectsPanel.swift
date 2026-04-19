@@ -1,0 +1,102 @@
+import Foundation
+import SwiftUI
+
+struct EffectsPanel: View {
+    @Binding var reverb: Float
+    @Binding var fineTune: Float
+    @Binding var echoMix: Float
+    @Binding var echoDelay: Float
+    @Binding var delayMix: Float
+    @Binding var delayTime: Float
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Effects")
+                .foregroundColor(.white)
+                .font(.system(size: 18, weight: .bold))
+
+            sectionHeader("Fine Tune")
+            SliderWithLabel(
+                label: "Pitch",
+                value: $fineTune,
+                range: -100...100,
+                color: Color(red: 1.0, green: 215/255, blue: 0),
+                formatter: { "\(Int($0)) cents" }
+            )
+
+            sectionHeader("Reverb")
+            SliderWithLabel(
+                label: "Mix",
+                value: $reverb,
+                range: 0...100,
+                color: .purple
+            )
+
+            sectionHeader("Echo")
+            SliderWithLabel(
+                label: "Mix",
+                value: $echoMix,
+                range: 0...1,
+                color: .cyan
+            )
+            SliderWithLabel(
+                label: "Delay",
+                value: $echoDelay,
+                range: 50...1000,
+                color: .cyan,
+                formatter: { "\(Int($0)) ms" }
+            )
+
+            sectionHeader("Delay")
+            SliderWithLabel(
+                label: "Mix",
+                value: $delayMix,
+                range: 0...1,
+                color: Color(red: 1.0, green: 165/255, blue: 0)
+            )
+            SliderWithLabel(
+                label: "Time",
+                value: $delayTime,
+                range: 50...2000,
+                color: Color(red: 1.0, green: 165/255, blue: 0),
+                formatter: { "\(Int($0)) ms" }
+            )
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.67))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .foregroundColor(Color(red: 1.0, green: 165/255, blue: 0))
+            .font(.system(size: 13, weight: .semibold))
+            .padding(.top, 10)
+            .padding(.bottom, 2)
+    }
+}
+
+struct SliderWithLabel: View {
+    let label: String
+    @Binding var value: Float
+    let range: ClosedRange<Float>
+    let color: Color
+    var formatter: (Float) -> String = { String(format: "%.2f", $0) }
+
+    var body: some View {
+        VStack(spacing: 2) {
+            HStack {
+                Text(label).foregroundColor(.white)
+                Spacer()
+                Text(formatter(value))
+                    .foregroundColor(Color(white: 0.8))
+                    .font(.system(size: 13))
+            }
+            Slider(value: $value, in: range)
+                .tint(color)
+        }
+        .padding(.vertical, 2)
+    }
+}
