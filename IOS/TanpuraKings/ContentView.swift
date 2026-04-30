@@ -11,6 +11,17 @@ struct ContentView: View {
     @State private var delayMix: Float = 0
     @State private var delayTime: Float = 500
 
+    // New: 3-band EQ (each in dB), stereo width
+    @State private var eqLow: Float = 0
+    @State private var eqMid: Float = 0
+    @State private var eqHigh: Float = 0
+    @State private var stereoWidth: Float = 0.5
+
+    // New: metronome
+    @State private var metronomeOn: Bool = false
+    @State private var metronomeBPM: Float = 80
+    @State private var metronomeVolume: Float = 0.7
+
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
@@ -40,13 +51,23 @@ struct ContentView: View {
                     )
                 }
 
+                MetronomePanel(
+                    isOn: $metronomeOn,
+                    bpm: $metronomeBPM,
+                    volume: $metronomeVolume
+                )
+
                 EffectsPanel(
                     reverb: $reverb,
                     fineTune: $fineTune,
                     echoMix: $echoMix,
                     echoDelay: $echoDelay,
                     delayMix: $delayMix,
-                    delayTime: $delayTime
+                    delayTime: $delayTime,
+                    eqLow: $eqLow,
+                    eqMid: $eqMid,
+                    eqHigh: $eqHigh,
+                    stereoWidth: $stereoWidth
                 )
 
                 MasterVolumeView(masterVolume: $masterVolume)
@@ -82,6 +103,22 @@ struct ContentView: View {
         .onChange(of: echoDelay) { _, _ in pushEffects() }
         .onChange(of: delayMix) { _, _ in pushEffects() }
         .onChange(of: delayTime) { _, _ in pushEffects() }
+        .onChange(of: eqLow) { _, _ in pushEQ() }
+        .onChange(of: eqMid) { _, _ in pushEQ() }
+        .onChange(of: eqHigh) { _, _ in pushEQ() }
+        .onChange(of: stereoWidth) { _, newValue in
+            AudioManager.shared.updateStereoWidth(newValue)
+        }
+        .onChange(of: metronomeOn) { _, on in
+            if on { AudioManager.shared.startMetronome() }
+            else  { AudioManager.shared.stopMetronome() }
+        }
+        .onChange(of: metronomeBPM) { _, bpm in
+            AudioManager.shared.setMetronomeBPM(bpm)
+        }
+        .onChange(of: metronomeVolume) { _, v in
+            AudioManager.shared.setMetronomeVolume(v)
+        }
     }
 
     private func pushEffects() {
@@ -93,6 +130,10 @@ struct ContentView: View {
             delayMix: delayMix,
             delayTime: delayTime
         )
+    }
+
+    private func pushEQ() {
+        AudioManager.shared.updateEQ(low: eqLow, mid: eqMid, high: eqHigh)
     }
 }
 

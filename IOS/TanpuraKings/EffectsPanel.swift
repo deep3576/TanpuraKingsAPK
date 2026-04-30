@@ -8,6 +8,10 @@ struct EffectsPanel: View {
     @Binding var echoDelay: Float
     @Binding var delayMix: Float
     @Binding var delayTime: Float
+    @Binding var eqLow: Float
+    @Binding var eqMid: Float
+    @Binding var eqHigh: Float
+    @Binding var stereoWidth: Float
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -22,6 +26,38 @@ struct EffectsPanel: View {
                 range: -100...100,
                 color: Color(red: 1.0, green: 215/255, blue: 0),
                 formatter: { "\(Int($0)) cents" }
+            )
+
+            sectionHeader("Equalizer")
+            SliderWithLabel(
+                label: "Low",
+                value: $eqLow,
+                range: -12...12,
+                color: Color(red: 0.4, green: 0.85, blue: 0.4),
+                formatter: { String(format: "%+.1f dB", $0) }
+            )
+            SliderWithLabel(
+                label: "Mid",
+                value: $eqMid,
+                range: -12...12,
+                color: Color(red: 0.4, green: 0.85, blue: 0.4),
+                formatter: { String(format: "%+.1f dB", $0) }
+            )
+            SliderWithLabel(
+                label: "High",
+                value: $eqHigh,
+                range: -12...12,
+                color: Color(red: 0.4, green: 0.85, blue: 0.4),
+                formatter: { String(format: "%+.1f dB", $0) }
+            )
+
+            sectionHeader("Stereo Width")
+            SliderWithLabel(
+                label: "Width",
+                value: $stereoWidth,
+                range: 0...1,
+                color: Color(red: 0.5, green: 0.7, blue: 1.0),
+                formatter: { String(format: "%.0f%%", $0 * 100) }
             )
 
             sectionHeader("Reverb")
