@@ -108,6 +108,15 @@ object AudioManager {
     // (callers pass it per-note; we cache the most recent value here).
     private var currentMasterVolume: Float = 1f
 
+    // Audio focus state. When another app grabs focus (transient — e.g. a
+    // notification, navigation prompt, voice assistant, brief sound from a
+    // background app) we tear down our active notes and snapshot them. When
+    // focus comes back we replay the snapshot at their previous per-note
+    // volumes — that's the "doesn't auto-resume after foreign sound stops"
+    // bug fix.
+    @Volatile private var pausedForFocus: Boolean = false
+    private var pausedNotesSnapshot: Map<String, Float> = emptyMap()
+
     // Effect parameters
     private var fineTuneCents: Float = 0f
     private var reverbMix:     Float = 0f
@@ -214,17 +223,68 @@ object AudioManager {
             val req = AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(attrs)
                 .setAcceptsDelayedFocusGain(true)
-                .setOnAudioFocusChangeListener { /* tanpura keeps droning through transient ducks */ }
+                .setOnAudioFocusChangeListener { change -> handleAudioFocusChange(change) }
                 .build()
             focusRequest = req
             sys.requestAudioFocus(req)
         } else {
             @Suppress("DEPRECATION")
             sys.requestAudioFocus(
-                null,
+                { change -> handleAudioFocusChange(change) },
                 android.media.AudioManager.STREAM_MUSIC,
                 android.media.AudioManager.AUDIOFOCUS_GAIN
             )
+        }
+    }
+
+    // Audio focus arbitration. Triggers when another app starts/stops
+    // primary audio output — phone calls, navigation prompts, voice
+    // assistant, even brief sounds from a background app.
+    //
+    //  - LOSS_TRANSIENT: pause our drones and snapshot which notes were
+    //    playing + at what per-note volumes. When the foreign app finishes
+    //    we'll get GAIN and replay them. This is the case the user hit:
+    //    "another background app makes a sound and we don't resume".
+    //  - LOSS (permanent — a phone call, or another media app took over for
+    //    an indefinite period): stop everything and DROP the snapshot.
+    //    The user will tap notes again when they come back.
+    //  - LOSS_TRANSIENT_CAN_DUCK: a notification chime, etc. The OS lets
+    //    us keep playing at lower mix. A drone sounds fine through that,
+    //    so we do nothing.
+    //  - GAIN: replay the LOSS_TRANSIENT snapshot if any.
+    private fun handleAudioFocusChange(change: Int) {
+        val scope = coroutineScope ?: return
+        when (change) {
+            android.media.AudioManager.AUDIOFOCUS_GAIN -> {
+                if (!pausedForFocus) return
+                pausedForFocus = false
+                val snap = pausedNotesSnapshot
+                pausedNotesSnapshot = emptyMap()
+                if (snap.isEmpty()) return
+                scope.launch {
+                    // Tiny settle so the foreign app's render-tail isn't
+                    // overlapping our first frame on Bluetooth.
+                    delay(120)
+                    val master = currentMasterVolume
+                    snap.forEach { (name, nv) -> playNote(name, master, nv) }
+                }
+            }
+            android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                if (pausedForFocus) return
+                if (activePlayers.isEmpty()) return
+                pausedForFocus = true
+                pausedNotesSnapshot = HashMap(noteVolumes)
+                stopAllNotes()
+            }
+            android.media.AudioManager.AUDIOFOCUS_LOSS -> {
+                pausedForFocus = false
+                pausedNotesSnapshot = emptyMap()
+                if (activePlayers.isNotEmpty()) stopAllNotes()
+            }
+            android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                // Drone is steady; let it keep playing. The foreign app
+                // will mix on top briefly.
+            }
         }
     }
 
