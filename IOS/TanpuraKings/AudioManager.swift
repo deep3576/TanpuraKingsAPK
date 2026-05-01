@@ -151,12 +151,18 @@ final class AudioManager: NSObject {
                 self?.engine.pause()
             }
         case .ended:
-            let opts = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt).map {
-                AVAudioSession.InterruptionOptions(rawValue: $0)
-            }
-            if opts?.contains(.shouldResume) == true {
-                restartEngineAndResumeNotes()
-            }
+            // Many sources (Siri, navigation prompts, system notifications,
+            // brief sounds from background apps) end an interruption WITHOUT
+            // setting .shouldResume — Apple's old "should we automatically
+            // resume?" hint only fires reliably for music apps. For a drone
+            // instrument the user expects the tone to come back as soon as
+            // the foreign sound finishes, so we always restart unconditionally.
+            // restartEngineAndResumeNotes is idempotent: it re-activates the
+            // session, re-starts the engine, and re-schedules every still-
+            // active note from frame 0. Stale completion handlers are
+            // invalidated by the per-note generation counter.
+            _ = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt)
+            restartEngineAndResumeNotes()
         @unknown default:
             break
         }
