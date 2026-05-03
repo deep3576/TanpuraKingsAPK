@@ -235,15 +235,18 @@ final class AudioManager: NSObject {
             print("AudioSession error: \(error)")
         }
 
-        reverbUnit.loadFactoryPreset(.largeHall)
+        // Cathedral gives more space and warmth than largeHall for a tanpura drone.
+        reverbUnit.loadFactoryPreset(.cathedral)
         reverbUnit.wetDryMix = 0
 
         delayUnit.delayTime = TimeInterval(delayTimeMs / 1000.0)
-        delayUnit.feedback = 0
+        // 55 % feedback = ~4–5 audible repeats before fading. 0 % (the old value)
+        // meant a single, near-inaudible tap — that was why the effect felt broken.
+        delayUnit.feedback = 55
         delayUnit.wetDryMix = 0
 
         echoUnit.delayTime = TimeInterval(echoDelayMs / 1000.0)
-        echoUnit.feedback = 45
+        echoUnit.feedback = 68   // more tail than the old 45 %
         echoUnit.wetDryMix = 0
 
         // 3-band EQ: low shelf @ 100 Hz, mid parametric @ 1 kHz, high shelf @ 8 kHz.
@@ -511,10 +514,7 @@ final class AudioManager: NSObject {
         queue.async { [weak self] in
             guard let self = self else { return }
             self.metronomeBPM = max(40, min(240, bpm))
-            if self.metronomeRunning {
-                let interval = 60.0 / Double(self.metronomeBPM)
-                self.metronomeTimer?.schedule(deadline: .now() + interval, repeating: interval)
-            }
+            // Timer reads metronomeBPM fresh on every tick, so no reschedule needed.
         }
     }
 
@@ -535,15 +535,26 @@ final class AudioManager: NSObject {
             if !self.metronomePlayer.isPlaying {
                 self.metronomePlayer.play()
             }
-            // Fire one click immediately, then on every interval.
-            self.tickMetronome()
-            let interval = 60.0 / Double(self.metronomeBPM)
-            let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            timer.schedule(deadline: .now() + interval, repeating: interval)
-            timer.setEventHandler { [weak self] in self?.tickMetronome() }
-            timer.resume()
-            self.metronomeTimer = timer
+            self.scheduleNextMetronomeTick()
         }
+    }
+
+    // Single-fire self-rescheduling timer. Each tick reads the current BPM
+    // so tempo changes take effect at the very next beat — no dead-time caused
+    // by re-setting a repeating timer's deadline on every slider drag.
+    private func scheduleNextMetronomeTick() {
+        guard metronomeRunning else { return }
+        tickMetronome()
+        let interval = 60.0 / Double(metronomeBPM)
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + interval)
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            self.metronomeTimer = nil
+            self.scheduleNextMetronomeTick()
+        }
+        timer.resume()
+        metronomeTimer = timer
     }
 
     func stopMetronome() {
@@ -637,11 +648,14 @@ final class AudioManager: NSObject {
             self.echoDelayMs = echoDelayVal
             self.echoUnit.delayTime = TimeInterval(max(0.05, min(2.0, echoDelayVal / 1000.0)))
             self.echoUnit.wetDryMix = max(0, min(100, echoVal * 100))
+            // Feedback scales with mix: low mix = subtle single echo, high mix = long decay.
+            self.echoUnit.feedback = 50 + echoVal * 30   // 50–80 %
 
             self.delayMix = delayVal
             self.delayTimeMs = delayTimeVal
             self.delayUnit.delayTime = TimeInterval(max(0.05, min(2.0, delayTimeVal / 1000.0)))
             self.delayUnit.wetDryMix = max(0, min(100, delayVal * 100))
+            self.delayUnit.feedback = 45 + delayVal * 30  // 45–75 %
         }
     }
 

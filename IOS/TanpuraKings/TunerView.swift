@@ -1,21 +1,12 @@
 import SwiftUI
 
-/// Analog-clock-style chromatic tuner.
-///
-/// The dial sweeps from -50 cents (left) to +50 cents (right). The needle
-/// points straight up (12-o-clock) when the user is exactly in tune with
-/// the nearest equal-tempered note.
-///
-/// Big "C4 / -3¢" readout below the dial. A simple input level meter
-/// helps the user confirm the mic is picking them up.
 struct TunerView: View {
     @ObservedObject private var tuner = TunerManager.shared
     @Environment(\.horizontalSizeClass) private var hSizeClass
-
     private var isIPad: Bool { hSizeClass == .regular }
 
     var body: some View {
-        VStack(spacing: isIPad ? 24 : 16) {
+        VStack(spacing: isIPad ? 20 : 12) {
             Text("Tuner")
                 .foregroundColor(.white)
                 .font(.system(size: 22, weight: .bold))
@@ -26,27 +17,27 @@ struct TunerView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 16)
 
-            TunerDial(
+            ChromaticWheelDial(
+                noteIndex: tuner.detected ? noteIndex(tuner.noteName) : -1,
                 cents: tuner.cents,
-                inTune: tuner.detected && abs(tuner.cents) < 5,
-                detected: tuner.detected
+                detected: tuner.detected,
+                inTune: tuner.detected && abs(tuner.cents) < 5
             )
             .frame(
-                width:  isIPad ? 380 : 280,
-                height: isIPad ? 380 : 280
+                width:  isIPad ? 340 : 260,
+                height: isIPad ? 340 : 260
             )
-            .padding(.top, 8)
 
             VStack(spacing: 4) {
                 Text(tuner.detected ? tuner.noteName : "—")
                     .foregroundColor(.white)
-                    .font(.system(size: isIPad ? 64 : 44, weight: .heavy, design: .rounded))
+                    .font(.system(size: isIPad ? 56 : 40, weight: .heavy, design: .rounded))
                     .monospacedDigit()
                 Text(tuner.detected
-                     ? String(format: "%+.0f cents", tuner.cents)
+                     ? String(format: "%+.0f¢", tuner.cents)
                      : "listening…")
                     .foregroundColor(centsColor)
-                    .font(.system(size: isIPad ? 24 : 18, weight: .semibold, design: .rounded))
+                    .font(.system(size: isIPad ? 22 : 16, weight: .semibold, design: .rounded))
                 Text(tuner.detected
                      ? String(format: "%.1f Hz", tuner.frequency)
                      : " ")
@@ -55,7 +46,11 @@ struct TunerView: View {
                     .monospacedDigit()
             }
 
-            // Input level bar.
+            PitchHistoryGraph(history: tuner.centsHistory)
+                .frame(height: isIPad ? 100 : 72)
+                .padding(.horizontal, 16)
+
+            // Input level bar
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 4)
@@ -88,149 +83,238 @@ struct TunerView: View {
     private var centsColor: Color {
         guard tuner.detected else { return Color(white: 0.7) }
         let c = abs(tuner.cents)
-        if c < 5  { return Color.green }
-        if c < 15 { return Color.yellow }
-        return Color.red
+        if c < 5  { return .green }
+        if c < 15 { return .yellow }
+        return .red
+    }
+
+    private func noteIndex(_ name: String) -> Int {
+        let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+        let base = String(name.prefix(while: { !$0.isNumber && $0 != "-" }))
+        return names.firstIndex(of: base) ?? -1
     }
 }
 
-/// Pure SwiftUI Canvas drawing of the analog dial. The needle angle maps
-/// linearly from -50¢ (-60°) to +50¢ (+60°), so the user gets ~1.2° of
-/// needle deflection per cent of pitch error — easy to read at a glance.
-private struct TunerDial: View {
-    let cents: Float
-    let inTune: Bool
-    let detected: Bool
+// MARK: - 360° Chromatic Wheel
 
-    /// Maximum needle deflection from 12-o-clock, in radians.
-    private let maxAngle: Double = .pi / 3 // ±60°
+/// Full-circle chromatic wheel with 12 note segments (C at 12 o'clock,
+/// clockwise). An animated needle points to the currently detected note
+/// + cents offset. Shortest-path angle wrapping prevents 330° back-spins
+/// when crossing the C/B boundary.
+private struct ChromaticWheelDial: View {
+    let noteIndex: Int   // 0–11 (C–B), or -1 when nothing is detected
+    let cents: Float
+    let detected: Bool
+    let inTune: Bool
+
+    @State private var displayAngle: Double = 0   // degrees, unwrapped
+
+    private let noteNames = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
 
     var body: some View {
-        Canvas { context, size in
-            let cx = size.width / 2
-            let cy = size.height / 2 + size.height * 0.12 // pivot below center
-            let radius = min(size.width, size.height) / 2 - 8
+        GeometryReader { geo in
+            let outerR = min(geo.size.width, geo.size.height) / 2 - 4
+            let needleLen = outerR * 0.54
+            let tailLen:  CGFloat = 14
 
-            // Backplate.
-            let plate = Path(ellipseIn: CGRect(
-                x: cx - radius, y: cy - radius,
-                width: radius * 2, height: radius * 2
-            ))
-            context.fill(plate, with: .color(Color.black.opacity(0.55)))
-            context.stroke(plate, with: .color(Color.white.opacity(0.25)), lineWidth: 2)
+            ZStack {
+                // Static wheel drawn with Canvas
+                Canvas { ctx, sz in
+                    drawWheel(ctx: ctx, size: sz, outerR: outerR)
+                }
 
-            // Color bands. -50..-15 red, -15..-5 yellow, -5..+5 green,
-            // +5..+15 yellow, +15..+50 red.
-            drawArcBand(in: context, cx: cx, cy: cy, radius: radius - 6,
-                        fromCents: -50, toCents: -15, color: .red)
-            drawArcBand(in: context, cx: cx, cy: cy, radius: radius - 6,
-                        fromCents: -15, toCents: -5, color: .yellow)
-            drawArcBand(in: context, cx: cx, cy: cy, radius: radius - 6,
-                        fromCents: -5,  toCents:  5, color: .green)
-            drawArcBand(in: context, cx: cx, cy: cy, radius: radius - 6,
-                        fromCents: 5,   toCents: 15, color: .yellow)
-            drawArcBand(in: context, cx: cx, cy: cy, radius: radius - 6,
-                        fromCents: 15,  toCents: 50, color: .red)
+                // Needle — uses SwiftUI rotationEffect so the animation is
+                // driven by the rendering system (no custom Animatable needed).
+                let nc: Color = detected ? (inTune ? .green : .white) : Color(white: 0.30)
+                NeedleShape(tipLength: needleLen, tailLength: tailLen)
+                    .stroke(nc, style: StrokeStyle(lineWidth: 3.2, lineCap: .round))
+                    .rotationEffect(.degrees(displayAngle))
 
-            // Tick marks every 10¢, longer every 25¢, plus center.
-            for c in stride(from: -50, through: 50, by: 5) {
-                let isMajor = (c % 25 == 0)
-                let isMid = (c % 10 == 0)
-                let inner = radius - (isMajor ? 26 : (isMid ? 20 : 14))
-                let outer = radius - 6
-                let angle = angleForCents(Float(c))
-                let p1 = CGPoint(
-                    x: cx + cos(angle - .pi/2) * inner,
-                    y: cy + sin(angle - .pi/2) * inner
-                )
-                let p2 = CGPoint(
-                    x: cx + cos(angle - .pi/2) * outer,
-                    y: cy + sin(angle - .pi/2) * outer
-                )
-                var tick = Path()
-                tick.move(to: p1)
-                tick.addLine(to: p2)
-                context.stroke(
-                    tick,
-                    with: .color(.white.opacity(isMajor ? 0.95 : (isMid ? 0.7 : 0.45))),
-                    lineWidth: isMajor ? 2.2 : (isMid ? 1.6 : 1.0)
-                )
+                // Center pivot
+                Circle()
+                    .fill(Color(red: 1.0, green: 165/255, blue: 0))
+                    .frame(width: 14, height: 14)
+                    .overlay(Circle().stroke(Color.white.opacity(0.85), lineWidth: 1.5))
             }
-
-            // Numeric labels at -50, -25, 0, +25, +50.
-            for c in [-50, -25, 0, 25, 50] {
-                let labelRadius = radius - 42
-                let angle = angleForCents(Float(c))
-                let pos = CGPoint(
-                    x: cx + cos(angle - .pi/2) * labelRadius,
-                    y: cy + sin(angle - .pi/2) * labelRadius
-                )
-                let text = Text(c == 0 ? "0" : "\(c > 0 ? "+" : "")\(c)")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white)
-                context.draw(text, at: pos, anchor: .center)
-            }
-
-            // Needle.
-            let clampedCents = max(-50, min(50, cents))
-            let needleAngle = angleForCents(clampedCents)
-            let needleColor: Color = detected
-                ? (inTune ? .green : .white)
-                : Color(white: 0.55)
-            let tip = CGPoint(
-                x: cx + cos(needleAngle - .pi/2) * (radius - 14),
-                y: cy + sin(needleAngle - .pi/2) * (radius - 14)
-            )
-            let tail = CGPoint(
-                x: cx - cos(needleAngle - .pi/2) * 18,
-                y: cy - sin(needleAngle - .pi/2) * 18
-            )
-            var needle = Path()
-            needle.move(to: tail)
-            needle.addLine(to: tip)
-            context.stroke(needle, with: .color(needleColor), style: StrokeStyle(
-                lineWidth: 3.5, lineCap: .round
-            ))
-
-            // Center pivot.
-            let pivotRadius: CGFloat = 9
-            let pivot = Path(ellipseIn: CGRect(
-                x: cx - pivotRadius, y: cy - pivotRadius,
-                width: pivotRadius * 2, height: pivotRadius * 2
-            ))
-            context.fill(pivot, with: .color(Color(red: 1.0, green: 165/255, blue: 0)))
-            context.stroke(pivot, with: .color(.white.opacity(0.85)), lineWidth: 1.5)
         }
-        .animation(.easeOut(duration: 0.12), value: cents)
-        .animation(.easeOut(duration: 0.2),  value: detected)
+        .onChange(of: noteIndex) { _, _ in animateToTarget() }
+        .onChange(of: cents)     { _, _ in animateToTarget() }
     }
 
-    private func angleForCents(_ c: Float) -> Double {
-        let frac = Double(max(-50, min(50, c))) / 50.0
-        return frac * maxAngle
+    private func animateToTarget() {
+        guard noteIndex >= 0, detected else { return }
+        // Each note occupies 30°; ±50¢ deflects ±15° (half a segment).
+        let base    = Double(noteIndex) * 30.0
+        let cOff    = Double(cents) / 50.0 * 15.0
+        let rawTarget = base + cOff
+
+        // Shortest-path delta: never spin more than 180° in one jump.
+        var delta = rawTarget - displayAngle.truncatingRemainder(dividingBy: 360)
+        if delta >  180 { delta -= 360 }
+        if delta < -180 { delta += 360 }
+
+        withAnimation(.easeOut(duration: 0.15)) {
+            displayAngle += delta
+        }
     }
 
-    private func drawArcBand(
-        in context: GraphicsContext,
-        cx: CGFloat, cy: CGFloat, radius: CGFloat,
-        fromCents: Float, toCents: Float,
-        color: Color
-    ) {
-        let start = angleForCents(fromCents) - .pi/2
-        let end   = angleForCents(toCents)   - .pi/2
-        var p = Path()
-        p.addArc(
-            center: CGPoint(x: cx, y: cy),
-            radius: radius,
-            startAngle: .radians(start),
-            endAngle: .radians(end),
-            clockwise: false
-        )
-        context.stroke(
-            p,
-            with: .color(color.opacity(0.55)),
-            style: StrokeStyle(lineWidth: 10, lineCap: .butt)
-        )
+    private func drawWheel(ctx: GraphicsContext, size: CGSize, outerR: CGFloat) {
+        let cx = size.width  / 2
+        let cy = size.height / 2
+        let arcR: CGFloat = outerR - 10
+        let arcW: CGFloat = 14
+
+        // Background disc
+        let bg = Path(ellipseIn: CGRect(x: cx-outerR, y: cy-outerR,
+                                        width: outerR*2, height: outerR*2))
+        ctx.fill(bg, with: .color(.black.opacity(0.55)))
+        ctx.stroke(bg, with: .color(.white.opacity(0.2)), lineWidth: 2)
+
+        for i in 0..<12 {
+            let isActive = (i == noteIndex)
+            let midDeg   = Double(i) * 30.0
+            let startDeg = midDeg - 15.0
+            let endDeg   = midDeg + 15.0
+
+            // Convert to canvas angles (0° = 3-o'clock in Core Graphics)
+            let startRad = (startDeg - 90.0) * .pi / 180.0
+            let endRad   = (endDeg   - 90.0) * .pi / 180.0
+            let midRad   = (midDeg   - 90.0) * .pi / 180.0
+
+            // Coloured segment arc
+            var arc = Path()
+            arc.addArc(center: CGPoint(x: cx, y: cy), radius: arcR,
+                       startAngle: .radians(startRad), endAngle: .radians(endRad),
+                       clockwise: false)
+            let segColor: Color = isActive
+                ? (inTune ? .green : Color(red: 1.0, green: 0.6, blue: 0.0))
+                : .white.opacity(0.10)
+            ctx.stroke(arc, with: .color(segColor),
+                       style: StrokeStyle(lineWidth: arcW, lineCap: .butt))
+
+            // Divider tick between segments
+            let divRad   = (endDeg - 90.0) * .pi / 180.0
+            let tInner   = arcR - arcW * 0.5 - 2
+            let tOuter   = arcR + arcW * 0.5 + 2
+            var div = Path()
+            div.move(to:    CGPoint(x: cx + cos(divRad)*tInner, y: cy + sin(divRad)*tInner))
+            div.addLine(to: CGPoint(x: cx + cos(divRad)*tOuter, y: cy + sin(divRad)*tOuter))
+            ctx.stroke(div, with: .color(.black.opacity(0.5)),
+                       style: StrokeStyle(lineWidth: 2, lineCap: .butt))
+
+            // Small tick mark at each note position (inner area)
+            let tickOuter = arcR - arcW * 0.5 - 4
+            let tickInner = tickOuter - (isActive ? 14 : 9)
+            var tick = Path()
+            tick.move(to:    CGPoint(x: cx + cos(midRad)*tickInner, y: cy + sin(midRad)*tickInner))
+            tick.addLine(to: CGPoint(x: cx + cos(midRad)*tickOuter, y: cy + sin(midRad)*tickOuter))
+            ctx.stroke(tick, with: .color(.white.opacity(isActive ? 1.0 : 0.50)),
+                       style: StrokeStyle(lineWidth: isActive ? 2.5 : 1.5, lineCap: .round))
+
+            // Note label inside the wheel
+            let labelR = outerR * 0.64
+            let pos    = CGPoint(x: cx + cos(midRad)*labelR, y: cy + sin(midRad)*labelR)
+            // Natural notes (no #) shown bigger
+            let isNatural = !noteNames[i].contains("#")
+            let label = Text(noteNames[i])
+                .font(.system(size: isNatural ? 14 : 11,
+                              weight: isActive ? .bold : .regular,
+                              design: .rounded))
+                .foregroundColor(isActive ? .white : .white.opacity(0.50))
+            ctx.draw(label, at: pos, anchor: .center)
+        }
+
+        // Faint inner circle to define the hub area
+        let hubR = outerR * 0.32
+        let hub  = Path(ellipseIn: CGRect(x: cx-hubR, y: cy-hubR, width: hubR*2, height: hubR*2))
+        ctx.stroke(hub, with: .color(.white.opacity(0.12)), lineWidth: 1)
+    }
+}
+
+// Draws a vertical needle centred at the view's midpoint: tip `tipLength`
+// above centre, tail `tailLength` below. Rotate with .rotationEffect.
+private struct NeedleShape: Shape {
+    let tipLength:  CGFloat
+    let tailLength: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let cx = rect.midX
+        let cy = rect.midY
+        var p  = Path()
+        p.move(to:    CGPoint(x: cx, y: cy + tailLength))   // tail (down)
+        p.addLine(to: CGPoint(x: cx, y: cy - tipLength))    // tip  (up = 12 o'clock)
+        return p
+    }
+}
+
+// MARK: - Pitch History Graph
+
+/// Scrolling line chart of cents deviation over the last ~150 frames (~6 s).
+/// Green band = ±5¢, yellow band = ±15¢. Float.nan breaks the line at
+/// silence gaps so the graph never connects voiced segments through silence.
+private struct PitchHistoryGraph: View {
+    let history: [Float]
+
+    var body: some View {
+        Canvas { ctx, size in
+            let w = size.width
+            let h = size.height
+            let midY = h / 2
+            let range: CGFloat = 50         // ±50¢ maps to ±h/2
+
+            // Background
+            let bg = Path(CGRect(x: 0, y: 0, width: w, height: h))
+            ctx.fill(bg, with: .color(.black.opacity(0.35)))
+
+            // ±15¢ yellow band
+            let y15top = midY - h / 2 * (15 / range)
+            let y15bot = midY + h / 2 * (15 / range)
+            let band15 = Path(CGRect(x: 0, y: y15top, width: w, height: y15bot - y15top))
+            ctx.fill(band15, with: .color(.yellow.opacity(0.12)))
+
+            // ±5¢ green band
+            let y5top  = midY - h / 2 * (5 / range)
+            let y5bot  = midY + h / 2 * (5 / range)
+            let band5  = Path(CGRect(x: 0, y: y5top, width: w, height: y5bot - y5top))
+            ctx.fill(band5, with: .color(.green.opacity(0.18)))
+
+            // Center line (0¢)
+            var center = Path()
+            center.move(to: CGPoint(x: 0, y: midY))
+            center.addLine(to: CGPoint(x: w, y: midY))
+            ctx.stroke(center, with: .color(.white.opacity(0.25)), lineWidth: 1)
+
+            // Pitch line — break on NaN
+            guard !history.isEmpty else { return }
+            let count   = history.count
+            let xStep   = w / CGFloat(max(count - 1, 1))
+            var linePath = Path()
+            var penDown  = false
+
+            for (i, val) in history.enumerated() {
+                let x = CGFloat(i) * xStep
+                if val.isNaN {
+                    penDown = false
+                    continue
+                }
+                let clampedCents = max(-range, min(range, CGFloat(val)))
+                let y = midY - (clampedCents / range) * (h / 2)
+                if penDown {
+                    linePath.addLine(to: CGPoint(x: x, y: y))
+                } else {
+                    linePath.move(to: CGPoint(x: x, y: y))
+                    penDown = true
+                }
+            }
+            ctx.stroke(linePath, with: .color(.white.opacity(0.90)),
+                       style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+
+            // Right-edge border
+            var border = Path()
+            border.addRect(CGRect(x: 0, y: 0, width: w, height: h))
+            ctx.stroke(border, with: .color(.white.opacity(0.18)), lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 
