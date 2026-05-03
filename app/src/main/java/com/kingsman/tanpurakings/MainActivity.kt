@@ -63,15 +63,39 @@ import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
-import kotlin.math.pow
+import kotlin.math.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.Manifest
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder as AndroidMediaRecorder
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 private const val MAX_ACTIVE_NOTES = 3
 private const val CROSSFADE_MS = 600L   // overlap window between old and new player
@@ -658,6 +682,153 @@ object AudioManager {
 }
 
 // ------------------------------
+// TunerManager — real-time chromatic pitch detector
+// ------------------------------
+object TunerManager {
+    private val _frequency   = MutableStateFlow(0f)
+    private val _noteName    = MutableStateFlow("—")
+    private val _cents       = MutableStateFlow(0f)
+    private val _isListening = MutableStateFlow(false)
+    private val _inputLevel  = MutableStateFlow(0f)
+    private val _detected    = MutableStateFlow(false)
+
+    val frequency:   StateFlow<Float>   = _frequency.asStateFlow()
+    val noteName:    StateFlow<String>  = _noteName.asStateFlow()
+    val cents:       StateFlow<Float>   = _cents.asStateFlow()
+    val isListening: StateFlow<Boolean> = _isListening.asStateFlow()
+    val inputLevel:  StateFlow<Float>   = _inputLevel.asStateFlow()
+    val detected:    StateFlow<Boolean> = _detected.asStateFlow()
+
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var audioRecord: AudioRecord? = null
+    private var processingJob: Job? = null
+
+    private const val SAMPLE_RATE = 44100
+    private const val FRAME_SIZE  = 2048
+
+    fun start() {
+        if (_isListening.value) return
+        val minBuf  = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT
+        )
+        val bufSize = maxOf(minBuf, FRAME_SIZE * 4)
+        val record  = AudioRecord(
+            AndroidMediaRecorder.AudioSource.MIC,
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_FLOAT,
+            bufSize
+        )
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            record.release()
+            Log.e("TunerManager", "AudioRecord init failed")
+            return
+        }
+        audioRecord = record
+        record.startRecording()
+        _isListening.value = true
+
+        processingJob = scope.launch {
+            val buf = FloatArray(FRAME_SIZE)
+            while (isActive) {
+                val read = record.read(buf, 0, FRAME_SIZE, AudioRecord.READ_BLOCKING)
+                if (read > 0) process(buf, read)
+            }
+        }
+    }
+
+    fun stop() {
+        processingJob?.cancel()
+        processingJob = null
+        audioRecord?.stop()
+        audioRecord?.release()
+        audioRecord      = null
+        _isListening.value = false
+        _detected.value    = false
+        _inputLevel.value  = 0f
+        _frequency.value   = 0f
+        _cents.value       = 0f
+        _noteName.value    = "—"
+    }
+
+    private fun process(samples: FloatArray, count: Int) {
+        var sumSq = 0f
+        for (i in 0 until count) sumSq += samples[i] * samples[i]
+        val rms   = sqrt(sumSq / count)
+        val level = minOf(1f, rms * 5f)
+
+        if (rms < 0.005f) {
+            _inputLevel.value = level; _detected.value = false; return
+        }
+
+        // Autocorrelation pitch detection (same algorithm as iOS TunerManager)
+        val minLag   = maxOf(2, SAMPLE_RATE / 1000)
+        val maxLag   = minOf(count - 1, SAMPLE_RATE / 60)
+        if (maxLag <= minLag + 4) return
+
+        val zeroLag  = sumSq
+        val corrSize = maxLag - minLag + 1
+        val corr     = FloatArray(corrSize)
+        for (k in 0 until corrSize) {
+            val lag = k + minLag; var s = 0f
+            for (i in 0 until count - lag) s += samples[i] * samples[i + lag]
+            corr[k] = s
+        }
+
+        val threshold = zeroLag * 0.3f
+        var passedDip = false; var bestIdx = -1; var bestCorr = 0f; var k = 1
+        while (k < corrSize - 1) {
+            val c = corr[k]
+            if (!passedDip) { if (c < threshold) passedDip = true }
+            else if (c > corr[k - 1] && c > corr[k + 1]) {
+                if (c > bestCorr) { bestCorr = c; bestIdx = k }
+                if (c > zeroLag * 0.5f) break
+            }
+            k++
+        }
+        if (bestIdx < 0) { _inputLevel.value = level; _detected.value = false; return }
+
+        // Parabolic interpolation for sub-sample accuracy
+        val yL    = corr[maxOf(0, bestIdx - 1)]
+        val yP    = corr[bestIdx]
+        val yR    = corr[minOf(corrSize - 1, bestIdx + 1)]
+        val denom = yL - 2 * yP + yR
+        val shift = if (denom == 0f) 0f else 0.5f * (yL - yR) / denom
+        val lag   = (bestIdx + minLag).toFloat() + shift
+        if (lag <= 0) return
+
+        val freq    = SAMPLE_RATE.toFloat() / lag
+        val clarity = if (zeroLag == 0f) 0f else bestCorr / zeroLag
+        if (!freq.isFinite() || freq < 50f || freq > 1500f || clarity < 0.3f) {
+            _inputLevel.value = level; _detected.value = false; return
+        }
+
+        val (note, centsVal) = noteAndCents(freq.toDouble())
+        val alpha = 0.6f
+        val smoothFreq  = if (_frequency.value == 0f) freq
+            else _frequency.value * alpha + freq * (1f - alpha)
+        val smoothCents = _cents.value * alpha + centsVal.toFloat() * (1f - alpha)
+
+        _frequency.value  = smoothFreq
+        _cents.value      = smoothCents
+        _noteName.value   = note
+        _inputLevel.value = level
+        _detected.value   = true
+    }
+
+    private fun noteAndCents(freq: Double): Pair<String, Double> {
+        val names   = arrayOf("C","C#","D","D#","E","F","F#","G","G#","A","A#","B")
+        val semis   = 12.0 * log2(freq / 440.0) + 69.0
+        val nearest = round(semis)
+        val cents   = (semis - nearest) * 100.0
+        val midi    = nearest.toInt()
+        val octave  = midi / 12 - 1
+        val idx     = ((midi % 12) + 12) % 12
+        return Pair("${names[idx]}$octave", cents)
+    }
+}
+
+// ------------------------------
 // Data model
 // ------------------------------
 data class PianoKey(val name: String, val isSharp: Boolean)
@@ -1024,6 +1195,202 @@ fun MasterVolumeView(masterVolume: MutableState<Float>) {
 }
 
 // ------------------------------
+// TunerDial — Canvas analog meter (-50¢ … +50¢)
+// ------------------------------
+@Composable
+private fun TunerDial(
+    cents: Float,
+    inTune: Boolean,
+    detected: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val animatedCents by animateFloatAsState(
+        targetValue    = cents.coerceIn(-50f, 50f),
+        animationSpec  = tween(durationMillis = 120),
+        label          = "needle"
+    )
+
+    // Map cents to angle in radians: 0¢ = 12-o'clock (−90°), ±50¢ = ±60°
+    val centsToRad = { c: Float ->
+        val frac = c.coerceIn(-50f, 50f) / 50f
+        (frac * 60.0 - 90.0) * (PI / 180.0)
+    }
+    // Compose drawArc uses 3-o'clock = 0°, clockwise. The full ±60° arc
+    // starts at 210° (Compose) and spans 120°.
+    val centsToArcDeg = { c: Float -> 210f + (c + 50f) / 100f * 120f }
+
+    Canvas(modifier = modifier) {
+        val cx     = size.width  / 2f
+        val cy     = size.height / 2f + size.height * 0.12f
+        val radius = minOf(size.width, size.height) / 2f - 8.dp.toPx()
+
+        // Backplate
+        drawCircle(Color.Black.copy(alpha = 0.55f), radius = radius, center = Offset(cx, cy))
+        drawCircle(
+            color  = Color.White.copy(alpha = 0.25f), radius = radius, center = Offset(cx, cy),
+            style  = Stroke(width = 2.dp.toPx())
+        )
+
+        // Color bands
+        val bandR      = radius - 6.dp.toPx()
+        val bandStroke = Stroke(width = 10.dp.toPx(), cap = StrokeCap.Butt)
+        listOf(
+            Triple(-50f, -15f, Color.Red),
+            Triple(-15f,  -5f, Color.Yellow),
+            Triple(  -5f,  5f, Color.Green),
+            Triple(   5f, 15f, Color.Yellow),
+            Triple(  15f, 50f, Color.Red)
+        ).forEach { (a, b, color) ->
+            drawArc(
+                color      = color.copy(alpha = 0.55f),
+                startAngle = centsToArcDeg(a),
+                sweepAngle = (b - a) / 100f * 120f,
+                useCenter  = false,
+                topLeft    = Offset(cx - bandR, cy - bandR),
+                size       = Size(bandR * 2f, bandR * 2f),
+                style      = bandStroke
+            )
+        }
+
+        // Tick marks every 5¢
+        for (c in -50..50 step 5) {
+            val isMajor = c % 25 == 0
+            val isMid   = c % 10 == 0
+            val inner   = radius - (if (isMajor) 26 else if (isMid) 20 else 14).dp.toPx()
+            val outer   = radius - 6.dp.toPx()
+            val angle   = centsToRad(c.toFloat())
+            val cosA    = cos(angle).toFloat()
+            val sinA    = sin(angle).toFloat()
+            drawLine(
+                color       = Color.White.copy(alpha = if (isMajor) 0.95f else if (isMid) 0.7f else 0.45f),
+                start       = Offset(cx + cosA * inner, cy + sinA * inner),
+                end         = Offset(cx + cosA * outer, cy + sinA * outer),
+                strokeWidth = (if (isMajor) 2.2f else if (isMid) 1.6f else 1.0f).dp.toPx(),
+                cap         = StrokeCap.Round
+            )
+        }
+
+        // Needle
+        val needleAngle = centsToRad(animatedCents)
+        val cosN = cos(needleAngle).toFloat()
+        val sinN = sin(needleAngle).toFloat()
+        val tipR = radius - 14.dp.toPx(); val tailR = 18.dp.toPx()
+        drawLine(
+            color       = if (detected) (if (inTune) Color.Green else Color.White) else Color.Gray.copy(alpha = 0.55f),
+            start       = Offset(cx - cosN * tailR, cy - sinN * tailR),
+            end         = Offset(cx + cosN * tipR,  cy + sinN * tipR),
+            strokeWidth = 3.5f.dp.toPx(),
+            cap         = StrokeCap.Round
+        )
+
+        // Center pivot
+        val pivotR = 9.dp.toPx()
+        drawCircle(Color(0xFFFFA500), radius = pivotR, center = Offset(cx, cy))
+        drawCircle(
+            color  = Color.White.copy(alpha = 0.85f), radius = pivotR, center = Offset(cx, cy),
+            style  = Stroke(width = 1.5f.dp.toPx())
+        )
+    }
+}
+
+// ------------------------------
+// TunerScreen
+// ------------------------------
+@Composable
+fun TunerScreen() {
+    val frequency  by TunerManager.frequency.collectAsState()
+    val noteName   by TunerManager.noteName.collectAsState()
+    val cents      by TunerManager.cents.collectAsState()
+    val detected   by TunerManager.detected.collectAsState()
+    val inputLevel by TunerManager.inputLevel.collectAsState()
+
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> if (granted) TunerManager.start() }
+
+    LaunchedEffect(Unit) { launcher.launch(Manifest.permission.RECORD_AUDIO) }
+
+    val inTune     = detected && abs(cents) < 5f
+    val centsColor = when {
+        !detected       -> Color(0xFFAAAAAA)
+        abs(cents) < 5f  -> Color.Green
+        abs(cents) < 15f -> Color.Yellow
+        else            -> Color.Red
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color.Blue.copy(alpha = 0.6f), Color(0xFF800080).copy(alpha = 0.8f))
+                )
+            )
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Spacer(modifier = Modifier.height(20.dp))
+        Text("Tuner", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text      = "Sing or play a sustained note.\nTanpura is paused while you tune.",
+            color     = Color(0xFFDDDDDD),
+            fontSize  = 13.sp,
+            textAlign = TextAlign.Center
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        TunerDial(
+            cents    = cents,
+            inTune   = inTune,
+            detected = detected,
+            modifier = Modifier.width(280.dp).height(280.dp)
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Note name
+        Text(
+            text       = if (detected) noteName else "—",
+            color      = Color.White,
+            fontSize   = 44.sp,
+            fontWeight = FontWeight.ExtraBold
+        )
+        // Cents offset
+        Text(
+            text      = if (detected) String.format(Locale.getDefault(), "%+.0f cents", cents) else "listening…",
+            color     = centsColor,
+            fontSize  = 18.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        // Frequency
+        Text(
+            text     = if (detected) String.format(Locale.getDefault(), "%.1f Hz", frequency) else " ",
+            color    = Color(0xFFAAAAAA),
+            fontSize = 13.sp
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Input level bar
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+                .height(6.dp)
+                .background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(3.dp))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(inputLevel.coerceIn(0f, 1f))
+                    .background(Color(0xFFFFA500), RoundedCornerShape(3.dp))
+            )
+        }
+    }
+}
+
+// ------------------------------
 // TanpuraKingsApp
 // ------------------------------
 @Composable
@@ -1084,6 +1451,77 @@ fun TanpuraKingsApp() {
         AudioManager.setMetronomeVolume(metronomeVolume.value)
     }
 
+    var selectedTab by remember { mutableIntStateOf(0) }
+
+    // Tab-switch side-effects: mirror iOS ContentView.onChange(of: selectedTab)
+    LaunchedEffect(selectedTab) {
+        when (selectedTab) {
+            1 -> {  // switched to Tuner — stop drone so mic doesn't pick it up
+                metronomeOn.value = false
+                AudioManager.stopMetronome()
+                AudioManager.stopAllNotes()
+                activeNotes.value      = emptySet()
+                activeNoteVolumes.value = emptyMap()
+            }
+            0 -> TunerManager.stop()   // switched back to Drone — stop mic
+        }
+    }
+
+    Scaffold(
+        containerColor = Color.Transparent,
+        bottomBar = {
+            NavigationBar(containerColor = Color.Black.copy(alpha = 0.85f)) {
+                NavigationBarItem(
+                    selected = selectedTab == 0,
+                    onClick  = { selectedTab = 0 },
+                    icon     = { Text("♪", fontSize = 22.sp, color = if (selectedTab == 0) Color(0xFFFFA500) else Color(0xFF888888)) },
+                    label    = { Text("Drone", color = if (selectedTab == 0) Color(0xFFFFA500) else Color(0xFF888888)) }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 1,
+                    onClick  = { selectedTab = 1 },
+                    icon     = { Text("🎤", fontSize = 18.sp) },
+                    label    = { Text("Tuner", color = if (selectedTab == 1) Color(0xFFFFA500) else Color(0xFF888888)) }
+                )
+            }
+        }
+    ) { innerPadding ->
+        Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+            when (selectedTab) {
+                0 -> DroneScreen(
+                    activeNotes, activeNoteVolumes, masterVolume,
+                    reverb, fineTune, echoMix, echoDelay, delayMix, delayTime,
+                    eqLow, eqMid, eqHigh, stereoWidth,
+                    metronomeOn, metronomeBpm, metronomeVolume
+                )
+                1 -> TunerScreen()
+            }
+        }
+    }
+}
+
+// ------------------------------
+// DroneScreen — the scrolling drone UI (extracted from TanpuraKingsApp)
+// ------------------------------
+@Composable
+fun DroneScreen(
+    activeNotes: MutableState<Set<String>>,
+    activeNoteVolumes: MutableState<Map<String, Float>>,
+    masterVolume: MutableState<Float>,
+    reverb: MutableState<Float>,
+    fineTune: MutableState<Float>,
+    echoMix: MutableState<Float>,
+    echoDelay: MutableState<Float>,
+    delayMix: MutableState<Float>,
+    delayTime: MutableState<Float>,
+    eqLow: MutableState<Float>,
+    eqMid: MutableState<Float>,
+    eqHigh: MutableState<Float>,
+    stereoWidth: MutableState<Float>,
+    metronomeOn: MutableState<Boolean>,
+    metronomeBpm: MutableState<Float>,
+    metronomeVolume: MutableState<Float>
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1098,16 +1536,11 @@ fun TanpuraKingsApp() {
     ) {
         Spacer(modifier = Modifier.height(20.dp))
         Image(
-            painter = painterResource(id = R.drawable.app_logo),
+            painter            = painterResource(id = R.drawable.app_logo),
             contentDescription = "Tanpura Kings logo",
-            modifier = Modifier.width(96.dp).height(96.dp)
+            modifier           = Modifier.width(96.dp).height(96.dp)
         )
-        Text(
-            "Tanpura Kings",
-            fontSize = 24.sp,
-            color = Color.White,
-            fontWeight = FontWeight.SemiBold
-        )
+        Text("Tanpura Kings", fontSize = 24.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(12.dp))
         AudioOutputButton()
         Spacer(modifier = Modifier.height(16.dp))
@@ -1119,10 +1552,7 @@ fun TanpuraKingsApp() {
         }
         MetronomePanel(metronomeOn, metronomeBpm, metronomeVolume)
         Spacer(modifier = Modifier.height(16.dp))
-        EffectsPanel(
-            reverb, fineTune, echoMix, echoDelay, delayMix, delayTime,
-            eqLow, eqMid, eqHigh, stereoWidth
-        )
+        EffectsPanel(reverb, fineTune, echoMix, echoDelay, delayMix, delayTime, eqLow, eqMid, eqHigh, stereoWidth)
         Spacer(modifier = Modifier.height(16.dp))
         MasterVolumeView(masterVolume)
         Spacer(modifier = Modifier.height(16.dp))
@@ -1130,7 +1560,7 @@ fun TanpuraKingsApp() {
             "© kingsman software solutions",
             fontSize = 14.sp, color = Color.White,
             textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
+            modifier  = Modifier.fillMaxWidth()
         )
     }
 }

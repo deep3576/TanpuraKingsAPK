@@ -4,6 +4,7 @@ struct PianoView: View {
     @Binding var activeNotes: Set<String>
     @Binding var activeNoteVolumes: [String: Float]
     let masterVolume: Float
+    var keyHeight: CGFloat = 200
 
     private let blackKeyPositions: [String: CGFloat] = [
         "C#": 0.75, "D#": 1.75, "F#": 3.75, "G#": 4.75, "A#": 5.75
@@ -25,14 +26,14 @@ struct PianoView: View {
                     let pos = blackKeyPositions[key.name] ?? 0
                     let bkWidth = whiteKeyWidth * 0.6
                     let offsetX = whiteKeyWidth * pos - bkWidth / 2
-                    blackKeyView(key: key, width: bkWidth, height: 120)
+                    blackKeyView(key: key, width: bkWidth, height: keyHeight * 0.6)
                         .offset(x: offsetX)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .background(Color(white: 0.83))
         }
-        .frame(height: 200)
+        .frame(height: keyHeight)
     }
 
     @ViewBuilder
