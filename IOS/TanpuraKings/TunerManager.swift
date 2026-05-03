@@ -3,23 +3,10 @@ import AVFoundation
 import Combine
 
 /// Real-time chromatic pitch detector backed by the device microphone.
-///
-/// Lifecycle:
-///   - `start()` requests mic permission (idempotent if already granted),
-///     switches the shared `AVAudioSession` to `.playAndRecord` with
-///     `.measurement` mode (disables iOS voice-processing / AGC, which
-///     would otherwise distort the fundamental we're trying to detect),
-///     installs a tap on the input node, and begins streaming.
-///   - `stop()` removes the tap, stops the input engine, and restores
-///     `.playback` so the drone tab works correctly when the user returns.
-///
-/// SwiftUI talks to this via `@Published` state. The drone tab is expected
-/// to call `AudioManager.shared.stopAllNotes()` *before* `start()` so the
-/// mic doesn't pick up our own tanpura.
 final class TunerManager: ObservableObject {
     static let shared = TunerManager()
 
-    // MARK: - Published state for the UI
+    // MARK: - Published state
 
     @Published var frequency: Float = 0
     @Published var noteName: String = "—"
@@ -27,6 +14,9 @@ final class TunerManager: ObservableObject {
     @Published var isListening: Bool = false
     @Published var inputLevel: Float = 0
     @Published var detected: Bool = false
+    /// Rolling cents-deviation history (max 150 frames ≈ 6 s).
+    /// Float.nan marks silence gaps so the graph can break the line.
+    @Published var centsHistory: [Float] = []
 
     // MARK: - Internals
 
@@ -34,6 +24,11 @@ final class TunerManager: ObservableObject {
     private var tapInstalled = false
     private var sampleRate: Double = 44_100
     private let referenceA: Double = 440.0
+
+    // Note stabilization: require 3 consecutive frames of the same note
+    // before displaying it, so the label doesn't flicker at note boundaries.
+    private var pendingNote: String = ""
+    private var pendingNoteCount: Int = 0
 
     private init() {}
 
@@ -65,10 +60,10 @@ final class TunerManager: ObservableObject {
         inputLevel = 0
         frequency = 0
         cents = 0
+        centsHistory.removeAll()
+        pendingNote = ""
+        pendingNoteCount = 0
 
-        // Restore the drone-friendly session category. The drone tab's
-        // AudioManager observes routeChangeNotification (categoryChange)
-        // and will re-start its engine if needed.
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default, options: [])
@@ -119,7 +114,6 @@ final class TunerManager: ObservableObject {
         let frameCount = Int(buffer.frameLength)
         guard frameCount > 512 else { return }
 
-        // RMS for level meter + silence gate.
         var sumSq: Float = 0
         for i in 0..<frameCount {
             let s = channelData[i]
@@ -128,30 +122,25 @@ final class TunerManager: ObservableObject {
         let rms = sqrt(sumSq / Float(frameCount))
         let level = min(1.0, Double(rms) * 5.0)
 
-        // Below the noise floor — don't bother detecting.
         if rms < 0.005 {
             DispatchQueue.main.async { [weak self] in
-                self?.inputLevel = Float(level)
-                self?.detected = false
+                guard let self = self else { return }
+                self.inputLevel = Float(level)
+                self.detected = false
+                self.centsHistory.append(.nan)
+                if self.centsHistory.count > 150 { self.centsHistory.removeFirst() }
             }
             return
         }
 
-        // Copy frames into a local Swift Array — keeps the hot inner loop
-        // free of pointer math.
         let samples = Array(UnsafeBufferPointer(start: channelData, count: frameCount))
         let sr = sampleRate
 
-        // Search in the range 60 Hz...1000 Hz which covers most singing
-        // voices and tanpura Sa (≈110–300 Hz) plus their first harmonic.
         let minLag = max(2, Int(sr / 1000.0))
         let maxLag = min(samples.count - 1, Int(sr / 60.0))
         guard maxLag > minLag + 4 else { return }
 
-        // Pre-compute zero-lag autocorrelation once.
         let zeroLag = sumSq
-
-        // Compute autocorrelation r(τ) for τ in [minLag..maxLag].
         var corr = [Float](repeating: 0, count: maxLag - minLag + 1)
         for k in 0..<corr.count {
             let lag = k + minLag
@@ -165,9 +154,6 @@ final class TunerManager: ObservableObject {
             corr[k] = s
         }
 
-        // Find the first significant local max after r(τ) drops below
-        // 30 % of r(0). This dodges the octave-error trap where a
-        // harmonic peak is taller than the fundamental peak.
         let threshold = zeroLag * 0.3
         var passedDip = false
         var bestIdx = -1
@@ -183,8 +169,6 @@ final class TunerManager: ObservableObject {
                         bestCorr = c
                         bestIdx = k
                     }
-                    // The first peak above 50 % of zero-lag is almost
-                    // certainly the fundamental — lock in and stop.
                     if c > zeroLag * 0.5 { break }
                 }
             }
@@ -193,28 +177,32 @@ final class TunerManager: ObservableObject {
 
         guard bestIdx > 0 else {
             DispatchQueue.main.async { [weak self] in
-                self?.inputLevel = Float(level)
-                self?.detected = false
+                guard let self = self else { return }
+                self.inputLevel = Float(level)
+                self.detected = false
+                self.centsHistory.append(.nan)
+                if self.centsHistory.count > 150 { self.centsHistory.removeFirst() }
             }
             return
         }
 
-        // Parabolic interpolation for sub-sample lag accuracy.
-        let yLeft = corr[max(0, bestIdx - 1)]
-        let yPeak = corr[bestIdx]
+        let yLeft  = corr[max(0, bestIdx - 1)]
+        let yPeak  = corr[bestIdx]
         let yRight = corr[min(corr.count - 1, bestIdx + 1)]
-        let denom = yLeft - 2 * yPeak + yRight
+        let denom  = yLeft - 2 * yPeak + yRight
         let shift: Float = denom == 0 ? 0 : 0.5 * (yLeft - yRight) / denom
         let refinedLag = Float(bestIdx + minLag) + shift
         guard refinedLag > 0 else { return }
         let freq = Float(sr) / refinedLag
         let clarity = zeroLag == 0 ? 0 : bestCorr / zeroLag
 
-        // Sanity bounds + clarity gate.
         if !freq.isFinite || freq < 50 || freq > 1500 || clarity < 0.3 {
             DispatchQueue.main.async { [weak self] in
-                self?.inputLevel = Float(level)
-                self?.detected = false
+                guard let self = self else { return }
+                self.inputLevel = Float(level)
+                self.detected = false
+                self.centsHistory.append(.nan)
+                if self.centsHistory.count > 150 { self.centsHistory.removeFirst() }
             }
             return
         }
@@ -223,31 +211,44 @@ final class TunerManager: ObservableObject {
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            // Light exponential smoothing — keeps the needle calm without
-            // adding so much lag that the tuner feels sluggish.
-            let smoothFactor: Float = 0.6
+            // Heavy smoothing (0.85) keeps the display stable without hiding
+            // real pitch drift — the history graph shows the raw trajectory.
+            let smoothFactor: Float = 0.85
             let smoothedFreq = self.frequency == 0
                 ? freq
                 : self.frequency * smoothFactor + freq * (1 - smoothFactor)
             let smoothedCents = self.cents * smoothFactor + Float(centsValue) * (1 - smoothFactor)
             self.frequency = smoothedFreq
             self.cents = smoothedCents
-            self.noteName = note
+
+            // Only flip the displayed note after 3 consecutive frames agree —
+            // prevents rapid flickering at note boundaries.
+            if note == self.pendingNote {
+                self.pendingNoteCount += 1
+            } else {
+                self.pendingNote = note
+                self.pendingNoteCount = 1
+            }
+            if self.pendingNoteCount >= 3 {
+                self.noteName = note
+            }
+
             self.inputLevel = Float(level)
             self.detected = true
+
+            self.centsHistory.append(smoothedCents)
+            if self.centsHistory.count > 150 { self.centsHistory.removeFirst() }
         }
     }
 
-    /// Returns (e.g.) ("A4", -3.2): nearest equal-tempered note name plus
-    /// the deviation in cents (-50…+50). Uses 440 Hz reference A4 = MIDI 69.
     private func noteAndCents(forFrequency freq: Double, refA: Double) -> (String, Double) {
         let names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
-        let semis = 12.0 * log2(freq / refA) + 69.0
+        let semis  = 12.0 * log2(freq / refA) + 69.0
         let nearest = round(semis)
-        let cents = (semis - nearest) * 100.0
-        let midi = Int(nearest)
-        let octave = midi / 12 - 1
-        let idx = ((midi % 12) + 12) % 12
+        let cents   = (semis - nearest) * 100.0
+        let midi    = Int(nearest)
+        let octave  = midi / 12 - 1
+        let idx     = ((midi % 12) + 12) % 12
         return ("\(names[idx])\(octave)", cents)
     }
 }

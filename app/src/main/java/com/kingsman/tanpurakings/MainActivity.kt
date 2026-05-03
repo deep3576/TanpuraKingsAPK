@@ -10,6 +10,7 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.media.SoundPool
+import android.media.audiofx.EnvironmentalReverb
 import android.media.audiofx.Equalizer
 import android.os.Build
 import android.os.Bundle
@@ -119,7 +120,12 @@ object AudioManager {
     private val noteSoundIds  = ConcurrentHashMap<String, Int>()
     private val noteDurations = ConcurrentHashMap<String, Long>()   // ms, fetched async
 
-    private val echoJobs = mutableMapOf<String, Job>()
+    private val echoJobs       = mutableMapOf<String, Job>()
+    // Extra looping MediaPlayer instances created for delay/echo repeats.
+    // Keyed by note name; released alongside their parent note.
+    private val effectPlayers  = mutableMapOf<String, MutableList<MediaPlayer>>()
+    // Hardware reverb (global audio session). Null when the device doesn't support it.
+    private var envReverb: EnvironmentalReverb? = null
     var isInitialized = false
     private var coroutineScope: CoroutineScope? = null
 
@@ -203,6 +209,26 @@ object AudioManager {
         }
         sys.registerAudioDeviceCallback(cb, null)
         deviceCallback = cb
+
+        // Global EnvironmentalReverb — audioSession=0 applies to all app audio.
+        // Hardware-accelerated; may be unavailable on some devices (caught silently).
+        try {
+            envReverb = EnvironmentalReverb(0, 0).apply {
+                roomLevel         = (-1500).toShort()  // -9000..0 mB
+                roomHFLevel       = (-800).toShort()   // -9000..0 mB
+                decayTime         = 3800               // 100-20000 ms — large hall
+                decayHFRatio      = 700.toShort()      // 100-2000
+                reflectionsLevel  = (-2600).toShort()  // -9000..1000 mB
+                reflectionsDelay  = 25                 // 0-300 ms
+                reverbLevel       = (-1200).toShort()  // -9000..2000 mB
+                reverbDelay       = 40                 // 0-100 ms
+                diffusion         = 1000.toShort()     // 0-1000
+                density           = 1000.toShort()     // 0-1000
+                enabled           = false
+            }
+        } catch (e: Exception) {
+            Log.w("AudioManager", "EnvironmentalReverb unavailable: $e")
+        }
 
         isInitialized = true
 
@@ -516,36 +542,9 @@ object AudioManager {
                 player.isLooping = true
             }
 
-            // Transient effects via SoundPool
-            val soundId = noteSoundIds[fileKey]
-            if (soundId != null && (reverbMix > 0f || echoMix > 0f || delayMix > 0f)) {
-                echoJobs[noteName]?.cancel()
-                echoJobs[noteName] = launch {
-                    if (reverbMix > 0f) launch {
-                        val intervals = longArrayOf(17, 23, 31, 41, 53, 67, 83, 101, 127)
-                        var vol = (volume * (reverbMix / 100f) * 0.75f).coerceAtMost(1f)
-                        var i = 0
-                        while (i < intervals.size && vol >= 0.02f) {
-                            delay(intervals[i++])
-                            soundPool.play(soundId, vol, vol, 0, 0, pitch)
-                            vol *= 0.6f
-                        }
-                    }
-                    if (delayMix > 0f) launch {
-                        delay(delayTimeMs.toLong())
-                        val vol = (volume * delayMix).coerceIn(0f, 1f)
-                        soundPool.play(soundId, vol, vol, 0, 0, pitch)
-                    }
-                    if (echoMix > 0f) launch {
-                        var vol = volume * echoMix
-                        while (vol > 0.02f) {
-                            delay(echoDelayMs.toLong())
-                            soundPool.play(soundId, vol.coerceIn(0f, 1f), vol.coerceIn(0f, 1f), 0, 0, pitch)
-                            vol *= 0.55f
-                        }
-                    }
-                }
-            }
+            // Persistent delay/echo via real looping MediaPlayer instances.
+            // (Reverb is handled globally by EnvironmentalReverb, no per-note work needed.)
+            launchEffectPlayers(noteName, fileKey, volume, pitch)
         }
     }
 
@@ -600,6 +599,9 @@ object AudioManager {
         val player = activePlayers.remove(noteName) ?: return
         loopJobs.remove(noteName)?.cancel()
         echoJobs.remove(noteName)?.cancel()
+        effectPlayers.remove(noteName)?.forEach { ep ->
+            runCatching { ep.stop() }; ep.release()
+        }
         val eq = equalizers.remove(noteName)
         val nv = noteVolumes.remove(noteName) ?: 1f
         val from = (currentMasterVolume * nv).coerceIn(0f, 1f)
@@ -631,6 +633,9 @@ object AudioManager {
     fun stopAllNotes() {
         loopJobs.values.forEach { it.cancel() };  loopJobs.clear()
         echoJobs.values.forEach { it.cancel() };  echoJobs.clear()
+        effectPlayers.values.forEach { list ->
+            list.forEach { ep -> runCatching { ep.stop() }; ep.release() }
+        };  effectPlayers.clear()
         equalizers.values.forEach { runCatching { it.release() } };  equalizers.clear()
         activePlayers.values.forEach { runCatching { it.stop() }; it.release() }
         activePlayers.clear(); noteVolumes.clear()
@@ -648,11 +653,82 @@ object AudioManager {
                 runCatching { player.playbackParams = PlaybackParams().setSpeed(1.0f).setPitch(pitch) }
             }
         }
-        reverbMix   = reverbMixVal
+
+        // Update reverb immediately via hardware effect.
+        applyReverbLevel(reverbMixVal)
+        reverbMix = reverbMixVal
+
+        val echoChanged  = echoMixVal  != echoMix  || echoDelayVal  != echoDelayMs
+        val delayChanged = delayMixVal != delayMix || delayTimeVal  != delayTimeMs
         echoMix     = echoMixVal
         echoDelayMs = echoDelayVal
         delayMix    = delayMixVal
         delayTimeMs = delayTimeVal
+
+        // Restart delay/echo players for all active notes when parameters change.
+        if ((echoChanged || delayChanged) && activePlayers.isNotEmpty()) {
+            val scope = coroutineScope ?: return
+            activePlayers.keys.toList().forEach { noteName ->
+                echoJobs.remove(noteName)?.cancel()
+                effectPlayers.remove(noteName)?.forEach { ep ->
+                    runCatching { ep.stop() }; ep.release()
+                }
+                val fileKey = noteName.lowercase().replace("#", "sharp")
+                val nv   = noteVolumes[noteName] ?: 1f
+                val vol  = (currentMasterVolume * nv).coerceIn(0f, 1f)
+                val pitch = fineTuneRate(fineTuneCents)
+                scope.launchEffectPlayers(noteName, fileKey, vol, pitch)
+            }
+        }
+    }
+
+    // Maps mix 0-100 to EnvironmentalReverb parameters with a sqrt curve so
+    // mid-range settings are clearly audible, not buried in the noise floor.
+    private fun applyReverbLevel(mix: Float) {
+        val er = envReverb ?: return
+        if (mix <= 0f) { runCatching { er.enabled = false }; return }
+        runCatching {
+            val t = sqrt(mix / 100f)                             // 0..1, perceptually linear
+            er.roomLevel   = ((-9000f + t * 8500f).toInt()).coerceIn(-9000, 0).toShort()
+            er.reverbLevel = ((-5000f + t * 7000f).toInt()).coerceIn(-9000, 2000).toShort()
+            er.enabled     = true
+        }
+    }
+
+    // Launches coroutines that create real looping MediaPlayer instances for
+    // each echo/delay tap. These persist until the note is stopped so the
+    // effect is heard for the full lifetime of the drone, not just at onset.
+    private fun CoroutineScope.launchEffectPlayers(
+        noteName: String, fileKey: String, volume: Float, pitch: Float
+    ) {
+        if (echoMix <= 0f && delayMix <= 0f) return
+        echoJobs[noteName] = launch {
+            // Echo: up to 4 decaying looping copies, each offset by echoDelayMs.
+            if (echoMix > 0f) launch {
+                var tapVol  = (volume * echoMix.coerceAtMost(1f)).coerceIn(0f, 1f)
+                var tapNum  = 0
+                while (tapNum < 4 && tapVol >= 0.04f) {
+                    delay(echoDelayMs.toLong())
+                    if (!isActive) break
+                    val ep = buildPlayer(fileKey, tapVol, pitch) ?: break
+                    ep.isLooping = true
+                    ep.start()
+                    effectPlayers.getOrPut(noteName) { mutableListOf() }.add(ep)
+                    tapVol *= 0.50f
+                    tapNum++
+                }
+            }
+            // Delay: a single looping copy that starts after delayTimeMs.
+            if (delayMix > 0f) launch {
+                delay(delayTimeMs.toLong())
+                if (!isActive) return@launch
+                val tapVol = (volume * delayMix).coerceIn(0f, 1f)
+                val ep = buildPlayer(fileKey, tapVol, pitch) ?: return@launch
+                ep.isLooping = true
+                ep.start()
+                effectPlayers.getOrPut(noteName) { mutableListOf() }.add(ep)
+            }
+        }
     }
 
     fun release() {
@@ -673,6 +749,7 @@ object AudioManager {
         }
         sysAudioManager = null
 
+        runCatching { envReverb?.release() }; envReverb = null
         if (::soundPool.isInitialized) soundPool.release()
         noteSoundIds.clear(); noteDurations.clear()
         appContext    = null
