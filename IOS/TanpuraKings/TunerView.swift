@@ -197,8 +197,8 @@ private struct ChromaticWheelDial: View {
             let tInner   = arcR - arcW * 0.5 - 2
             let tOuter   = arcR + arcW * 0.5 + 2
             var div = Path()
-            div.move(to:    CGPoint(x: cx + cos(divRad)*tInner, y: cy + sin(divRad)*tInner))
-            div.addLine(to: CGPoint(x: cx + cos(divRad)*tOuter, y: cy + sin(divRad)*tOuter))
+            div.move(to:    CGPoint(x: cx + CGFloat(cos(divRad))*tInner, y: cy + CGFloat(sin(divRad))*tInner))
+            div.addLine(to: CGPoint(x: cx + CGFloat(cos(divRad))*tOuter, y: cy + CGFloat(sin(divRad))*tOuter))
             ctx.stroke(div, with: .color(.black.opacity(0.5)),
                        style: StrokeStyle(lineWidth: 2, lineCap: .butt))
 
@@ -206,14 +206,14 @@ private struct ChromaticWheelDial: View {
             let tickOuter = arcR - arcW * 0.5 - 4
             let tickInner = tickOuter - (isActive ? 14 : 9)
             var tick = Path()
-            tick.move(to:    CGPoint(x: cx + cos(midRad)*tickInner, y: cy + sin(midRad)*tickInner))
-            tick.addLine(to: CGPoint(x: cx + cos(midRad)*tickOuter, y: cy + sin(midRad)*tickOuter))
+            tick.move(to:    CGPoint(x: cx + CGFloat(cos(midRad))*tickInner, y: cy + CGFloat(sin(midRad))*tickInner))
+            tick.addLine(to: CGPoint(x: cx + CGFloat(cos(midRad))*tickOuter, y: cy + CGFloat(sin(midRad))*tickOuter))
             ctx.stroke(tick, with: .color(.white.opacity(isActive ? 1.0 : 0.50)),
                        style: StrokeStyle(lineWidth: isActive ? 2.5 : 1.5, lineCap: .round))
 
             // Note label inside the wheel
             let labelR = outerR * 0.64
-            let pos    = CGPoint(x: cx + cos(midRad)*labelR, y: cy + sin(midRad)*labelR)
+            let pos    = CGPoint(x: cx + CGFloat(cos(midRad))*labelR, y: cy + CGFloat(sin(midRad))*labelR)
             // Natural notes (no #) shown bigger
             let isNatural = !noteNames[i].contains("#")
             let label = Text(noteNames[i])
