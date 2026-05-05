@@ -80,6 +80,12 @@ final class AudioManager: NSObject {
 
     private var didRegisterObservers = false
 
+    // Set to true on interruption.began, cleared on .ended or when setActive
+    // finally succeeds in the watchdog.  Lets the watchdog distinguish
+    // "session contested by another BT device — keep retrying" from
+    // "engine died for another reason".
+    private var isInterrupted = false
+
     // Periodic safety net. Re-kicks the engine and any active player that
     // should be looping but has gone silent (e.g. car Bluetooth dropping the
     // render thread, or a missed scheduleFile completion handler).
@@ -148,20 +154,16 @@ final class AudioManager: NSObject {
         switch type {
         case .began:
             queue.async { [weak self] in
-                self?.engine.pause()
+                guard let self = self else { return }
+                self.isInterrupted = true
+                self.engine.pause()
             }
         case .ended:
-            // Many sources (Siri, navigation prompts, system notifications,
-            // brief sounds from background apps) end an interruption WITHOUT
-            // setting .shouldResume — Apple's old "should we automatically
-            // resume?" hint only fires reliably for music apps. For a drone
-            // instrument the user expects the tone to come back as soon as
-            // the foreign sound finishes, so we always restart unconditionally.
-            // restartEngineAndResumeNotes is idempotent: it re-activates the
-            // session, re-starts the engine, and re-schedules every still-
-            // active note from frame 0. Stale completion handlers are
-            // invalidated by the per-note generation counter.
-            _ = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt)
+            // We always restart regardless of the .shouldResume hint — iOS
+            // omits it for many sources (BT handoff, Siri, nav prompts).
+            // restartEngineAndResumeNotes clears isInterrupted before it
+            // tries setActive, and re-sets it if setActive is still failing
+            // (session not yet released) so the watchdog keeps retrying.
             restartEngineAndResumeNotes()
         @unknown default:
             break
@@ -175,6 +177,7 @@ final class AudioManager: NSObject {
             self.watchdog?.cancel()
             self.watchdog = nil
             self.isInitialized = false
+            self.isInterrupted = false
             self.engine.stop()
         }
         DispatchQueue.main.async { [weak self] in
@@ -189,16 +192,17 @@ final class AudioManager: NSObject {
     private func restartEngineAndResumeNotes() {
         queue.async { [weak self] in
             guard let self = self, self.isInitialized else { return }
+            // Clear the interrupted flag optimistically; re-set it below if
+            // the session is still contested so the watchdog keeps retrying.
+            self.isInterrupted = false
             do {
                 try AVAudioSession.sharedInstance().setActive(true)
 
-                // After a route/config change the engine is implicitly stopped and
-                // every AVAudioPlayerNode has lost its scheduled file. We must stop
-                // each player, restart the engine, then re-schedule + re-play.
-                // Bumping the generation invalidates any in-flight completion
-                // handlers from the previous schedule — otherwise a stale
-                // handler would also call scheduleLooping and we'd run two
-                // re-schedule loops on the same player.
+                // After a route/config change every AVAudioPlayerNode has lost
+                // its scheduled file. Stop each player, restart the engine, then
+                // re-schedule + re-play. Bumping the generation invalidates any
+                // in-flight completion handler so we never run two re-schedule
+                // loops on the same player.
                 for (_, note) in self.activeNotes where !note.isStopping {
                     note.generation += 1
                     note.player.stop()
@@ -214,7 +218,12 @@ final class AudioManager: NSObject {
                     note.player.play()
                 }
             } catch {
-                print("Restart error: \(error)")
+                // Session still contested (common when a Bluetooth ownership
+                // change and the interruption-end fire at the same time, or
+                // when the remote device doesn't release the A2DP link cleanly).
+                // Mark as interrupted so the watchdog retries every 2 s.
+                print("Restart deferred — session busy: \(error)")
+                self.isInterrupted = true
             }
         }
     }
@@ -301,7 +310,10 @@ final class AudioManager: NSObject {
     private func startWatchdog() {
         watchdog?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 3, repeating: 3.0)
+        // 2 s interval — tighter than the old 3 s so audio resumes faster
+        // after a Bluetooth ownership change where .interruption.ended never
+        // fires (the most common multi-device BT failure mode).
+        timer.schedule(deadline: .now() + 2, repeating: 2.0)
         timer.setEventHandler { [weak self] in
             self?.watchdogTick()
         }
@@ -309,20 +321,40 @@ final class AudioManager: NSObject {
         watchdog = timer
     }
 
-    // Called every 3s on the audio queue. Cheap. Re-kicks anything that
-    // has fallen off — engine stopped due to a route change we missed,
-    // or a player whose loop completion handler never fired (seen on some
-    // car head units where the render thread is throttled hard).
+    // Called every 2 s on the audio queue. Handles two failure modes:
+    //
+    // 1. isInterrupted == true — another BT device has the A2DP link and
+    //    iOS never sent .interruption.ended.  Keep calling setActive(true)
+    //    every tick; when it finally succeeds the link has been released and
+    //    we can restart.
+    //
+    // 2. isInterrupted == false but a player silently stopped — engine died
+    //    from a route change we missed, or a loop completion handler was
+    //    never called (seen on some car head units).
     private func watchdogTick() {
         guard isInitialized else { return }
         guard !activeNotes.isEmpty else { return }
 
+        if isInterrupted {
+            // Try to reclaim the session. If the remote device still holds
+            // the BT link setActive throws and we return to try again next tick.
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+                isInterrupted = false
+                // Session reclaimed — fall through to restart the engine/players.
+            } catch {
+                return // Still contested; watchdog will retry in 2 s.
+            }
+        }
+
         if !engine.isRunning {
             do {
                 try AVAudioSession.sharedInstance().setActive(true)
+                engine.prepare()
                 try engine.start()
             } catch {
                 print("Watchdog engine restart failed: \(error)")
+                isInterrupted = true // keep retrying next tick
                 return
             }
         }

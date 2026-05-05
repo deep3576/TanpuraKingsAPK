@@ -288,33 +288,32 @@ object AudioManager {
     }
 
     // Audio focus arbitration. Triggers when another app starts/stops
-    // primary audio output — phone calls, navigation prompts, voice
-    // assistant, even brief sounds from a background app.
+    // primary audio output — phone calls, navigation prompts, BT handoff.
     //
-    //  - LOSS_TRANSIENT: pause our drones and snapshot which notes were
-    //    playing + at what per-note volumes. When the foreign app finishes
-    //    we'll get GAIN and replay them. This is the case the user hit:
-    //    "another background app makes a sound and we don't resume".
-    //  - LOSS (permanent — a phone call, or another media app took over for
-    //    an indefinite period): stop everything and DROP the snapshot.
-    //    The user will tap notes again when they come back.
-    //  - LOSS_TRANSIENT_CAN_DUCK: a notification chime, etc. The OS lets
-    //    us keep playing at lower mix. A drone sounds fine through that,
-    //    so we do nothing.
-    //  - GAIN: replay the LOSS_TRANSIENT snapshot if any.
+    //  - LOSS_TRANSIENT: another app needs focus briefly. Pause + snapshot.
+    //    GAIN will replay the snapshot when it releases.
+    //
+    //  - LOSS (permanent): Android fires this — NOT LOSS_TRANSIENT — when a
+    //    second phone takes over a shared Bluetooth speaker. We save the
+    //    snapshot here too instead of clearing it, so that when the remote
+    //    device disconnects and onAudioDevicesAdded fires (route change),
+    //    refreshActiveNotesOnRouteChange can restore the drone automatically.
+    //
+    //  - LOSS_TRANSIENT_CAN_DUCK: a notification chime etc. Keep playing.
+    //
+    //  - GAIN: replay the snapshot regardless of which LOSS variant fired.
     private fun handleAudioFocusChange(change: Int) {
         val scope = coroutineScope ?: return
         when (change) {
             android.media.AudioManager.AUDIOFOCUS_GAIN -> {
-                if (!pausedForFocus) return
+                // Replay any saved snapshot — covers both LOSS_TRANSIENT and
+                // LOSS (BT handoff) cases.
+                val snap = pausedNotesSnapshot.toMap()
                 pausedForFocus = false
-                val snap = pausedNotesSnapshot
                 pausedNotesSnapshot = emptyMap()
                 if (snap.isEmpty()) return
                 scope.launch {
-                    // Tiny settle so the foreign app's render-tail isn't
-                    // overlapping our first frame on Bluetooth.
-                    delay(120)
+                    delay(120) // let the foreign app's render-tail clear
                     val master = currentMasterVolume
                     snap.forEach { (name, nv) -> playNote(name, master, nv) }
                 }
@@ -327,41 +326,64 @@ object AudioManager {
                 stopAllNotes()
             }
             android.media.AudioManager.AUDIOFOCUS_LOSS -> {
+                // Save snapshot (don't clear it) so BT reconnect can restore.
+                // pausedForFocus = false means we don't expect GAIN from this
+                // specific cause, but GAIN is still consumed above if it arrives.
+                if (activePlayers.isNotEmpty() && pausedNotesSnapshot.isEmpty()) {
+                    pausedNotesSnapshot = HashMap(noteVolumes)
+                }
                 pausedForFocus = false
-                pausedNotesSnapshot = emptyMap()
                 if (activePlayers.isNotEmpty()) stopAllNotes()
             }
             android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                // Drone is steady; let it keep playing. The foreign app
-                // will mix on top briefly.
+                // Notification chime etc. — drone is a steady tone, keep playing.
             }
         }
     }
 
-    // Output device added/removed (Bluetooth speaker connect/disconnect, headphones
-    // plugged/unplugged, etc.). MediaPlayer doesn't auto-migrate to the new route
-    // reliably, so we snapshot the current notes, stop them, re-claim audio focus
-    // (so the new route is engaged as primary), and replay them with their previous
-    // per-note volumes.
+    // Output device added/removed (BT speaker connect/disconnect, headphones, etc.).
+    // MediaPlayer doesn't auto-migrate to the new route reliably, so we snapshot
+    // the current notes, stop them, re-claim audio focus, and replay.
+    //
+    // Key BT multi-device fix: when Device B had taken the speaker and we had
+    // already stopped all notes (activePlayers is empty), we check whether a
+    // saved snapshot exists from the earlier AUDIOFOCUS_LOSS and replay that
+    // instead of silently doing nothing.
     private fun refreshActiveNotesOnRouteChange() {
         val scope = coroutineScope ?: return
         scope.launch {
-            val snapshot = activePlayers.keys.toList()
-            if (snapshot.isEmpty()) {
+            val liveSnapshot   = activePlayers.keys.toList()
+            val liveVolumes    = HashMap(noteVolumes)
+            val savedSnapshot  = pausedNotesSnapshot.toMap()
+
+            if (liveSnapshot.isEmpty() && savedSnapshot.isEmpty()) {
+                // No notes to restore — just re-request focus so the new
+                // route is engaged as the primary output.
                 requestAudioFocusInternal()
                 return@launch
             }
-            val volumesAtSwitch = HashMap(noteVolumes)
-            snapshot.forEach { stopNote(it) }
+
+            // Stop whatever is still live (may be empty if notes were already
+            // stopped by AUDIOFOCUS_LOSS when Device B took the speaker).
+            liveSnapshot.forEach { stopNote(it) }
             requestAudioFocusInternal()
-            // Tiny delay lets the OS finish the route handoff before we
-            // build new MediaPlayers — without this some head units take
-            // the new players' first second and drop it.
+
+            // Give the OS time to finish the A2DP route handoff.
             delay(150)
+
             val master = currentMasterVolume
-            snapshot.forEach { name ->
-                val nv = volumesAtSwitch[name] ?: 1f
-                playNote(name, master, nv)
+            if (liveSnapshot.isNotEmpty()) {
+                // Normal route-change restart: replay what was live.
+                liveSnapshot.forEach { name ->
+                    val nv = liveVolumes[name] ?: 1f
+                    playNote(name, master, nv)
+                }
+            } else {
+                // Device B has gone — restore the snapshot saved when it took
+                // the speaker so the drone resumes without any user interaction.
+                pausedNotesSnapshot = emptyMap()
+                pausedForFocus      = false
+                savedSnapshot.forEach { (name, nv) -> playNote(name, master, nv) }
             }
         }
     }
