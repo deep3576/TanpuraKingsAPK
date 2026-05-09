@@ -1,6 +1,8 @@
 package com.kingsman.tanpurakings
 
 import android.content.Context
+import android.graphics.Paint as NativePaint
+import android.graphics.Typeface
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
@@ -38,7 +40,12 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -80,7 +87,9 @@ import android.media.AudioRecord
 import android.media.MediaRecorder as AndroidMediaRecorder
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.material3.NavigationBar
@@ -784,23 +793,29 @@ object AudioManager {
 // TunerManager — real-time chromatic pitch detector
 // ------------------------------
 object TunerManager {
-    private val _frequency   = MutableStateFlow(0f)
-    private val _noteName    = MutableStateFlow("—")
-    private val _cents       = MutableStateFlow(0f)
-    private val _isListening = MutableStateFlow(false)
-    private val _inputLevel  = MutableStateFlow(0f)
-    private val _detected    = MutableStateFlow(false)
+    private val _frequency    = MutableStateFlow(0f)
+    private val _noteName     = MutableStateFlow("—")
+    private val _cents        = MutableStateFlow(0f)
+    private val _isListening  = MutableStateFlow(false)
+    private val _inputLevel   = MutableStateFlow(0f)
+    private val _detected     = MutableStateFlow(false)
+    private val _centsHistory = MutableStateFlow<List<Float>>(emptyList())
 
-    val frequency:   StateFlow<Float>   = _frequency.asStateFlow()
-    val noteName:    StateFlow<String>  = _noteName.asStateFlow()
-    val cents:       StateFlow<Float>   = _cents.asStateFlow()
-    val isListening: StateFlow<Boolean> = _isListening.asStateFlow()
-    val inputLevel:  StateFlow<Float>   = _inputLevel.asStateFlow()
-    val detected:    StateFlow<Boolean> = _detected.asStateFlow()
+    val frequency:    StateFlow<Float>        = _frequency.asStateFlow()
+    val noteName:     StateFlow<String>       = _noteName.asStateFlow()
+    val cents:        StateFlow<Float>        = _cents.asStateFlow()
+    val isListening:  StateFlow<Boolean>      = _isListening.asStateFlow()
+    val inputLevel:   StateFlow<Float>        = _inputLevel.asStateFlow()
+    val detected:     StateFlow<Boolean>      = _detected.asStateFlow()
+    val centsHistory: StateFlow<List<Float>>  = _centsHistory.asStateFlow()
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var audioRecord: AudioRecord? = null
     private var processingJob: Job? = null
+
+    // Note stabilisation: require 3 consecutive frames of the same note
+    private var pendingNote      = ""
+    private var pendingNoteCount = 0
 
     private const val SAMPLE_RATE = 44100
     private const val FRAME_SIZE  = 2048
@@ -841,13 +856,16 @@ object TunerManager {
         processingJob = null
         audioRecord?.stop()
         audioRecord?.release()
-        audioRecord      = null
-        _isListening.value = false
-        _detected.value    = false
-        _inputLevel.value  = 0f
-        _frequency.value   = 0f
-        _cents.value       = 0f
-        _noteName.value    = "—"
+        audioRecord         = null
+        _isListening.value  = false
+        _detected.value     = false
+        _inputLevel.value   = 0f
+        _frequency.value    = 0f
+        _cents.value        = 0f
+        _noteName.value     = "—"
+        _centsHistory.value = emptyList()
+        pendingNote         = ""
+        pendingNoteCount    = 0
     }
 
     private fun process(samples: FloatArray, count: Int) {
@@ -857,7 +875,10 @@ object TunerManager {
         val level = minOf(1f, rms * 5f)
 
         if (rms < 0.005f) {
-            _inputLevel.value = level; _detected.value = false; return
+            _inputLevel.value = level
+            _detected.value   = false
+            appendHistory(Float.NaN)
+            return
         }
 
         // Autocorrelation pitch detection (same algorithm as iOS TunerManager)
@@ -885,7 +906,10 @@ object TunerManager {
             }
             k++
         }
-        if (bestIdx < 0) { _inputLevel.value = level; _detected.value = false; return }
+        if (bestIdx < 0) {
+            _inputLevel.value = level; _detected.value = false
+            appendHistory(Float.NaN); return
+        }
 
         // Parabolic interpolation for sub-sample accuracy
         val yL    = corr[maxOf(0, bestIdx - 1)]
@@ -899,20 +923,32 @@ object TunerManager {
         val freq    = SAMPLE_RATE.toFloat() / lag
         val clarity = if (zeroLag == 0f) 0f else bestCorr / zeroLag
         if (!freq.isFinite() || freq < 50f || freq > 1500f || clarity < 0.3f) {
-            _inputLevel.value = level; _detected.value = false; return
+            _inputLevel.value = level; _detected.value = false
+            appendHistory(Float.NaN); return
         }
 
         val (note, centsVal) = noteAndCents(freq.toDouble())
-        val alpha = 0.6f
+        val alpha       = 0.85f
         val smoothFreq  = if (_frequency.value == 0f) freq
             else _frequency.value * alpha + freq * (1f - alpha)
         val smoothCents = _cents.value * alpha + centsVal.toFloat() * (1f - alpha)
 
+        // 3-frame note hysteresis — prevents flicker at note boundaries
+        if (note == pendingNote) pendingNoteCount++
+        else { pendingNote = note; pendingNoteCount = 1 }
+        if (pendingNoteCount >= 3) _noteName.value = note
+
         _frequency.value  = smoothFreq
         _cents.value      = smoothCents
-        _noteName.value   = note
         _inputLevel.value = level
         _detected.value   = true
+        appendHistory(smoothCents)
+    }
+
+    private fun appendHistory(value: Float) {
+        val cur = _centsHistory.value
+        val next = if (cur.size >= 150) cur.drop(1) + value else cur + value
+        _centsHistory.value = next
     }
 
     private fun noteAndCents(freq: Double): Pair<String, Double> {
@@ -1294,101 +1330,226 @@ fun MasterVolumeView(masterVolume: MutableState<Float>) {
 }
 
 // ------------------------------
-// TunerDial — Canvas analog meter (-50¢ … +50¢)
+// TunerDial — 360° chromatic wheel with all 12 notes.
+// Each note occupies a 30° segment. Active note is highlighted with
+// accuracy colour. Inner ring shows ±50¢ colour zones.
+// The needle rotates from centre to the exact note+cents position.
 // ------------------------------
 @Composable
 private fun TunerDial(
+    noteName: String,
     cents: Float,
     inTune: Boolean,
     detected: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val animatedCents by animateFloatAsState(
-        targetValue    = cents.coerceIn(-50f, 50f),
-        animationSpec  = tween(durationMillis = 120),
-        label          = "needle"
+    val noteNames = listOf("C","C#","D","D#","E","F","F#","G","G#","A","A#","B")
+    val base      = noteName.takeWhile { !it.isDigit() && it != '-' }
+    val noteIndex = if (detected) noteNames.indexOf(base).takeIf { it >= 0 } ?: -1 else -1
+
+    // Animate the needle angle (unwrapped degrees, shortest-path)
+    // Each note = 30°; ±50¢ → ±15° within its slot.
+    val targetAngle = if (noteIndex >= 0 && detected) {
+        noteIndex * 30f + (cents.coerceIn(-50f, 50f) / 50f) * 15f
+    } else 0f
+
+    var displayAngle by remember { mutableFloatStateOf(0f) }
+
+    // Shortest-path update whenever target changes
+    LaunchedEffect(noteIndex, cents, detected) {
+        if (!detected || noteIndex < 0) return@LaunchedEffect
+        val raw   = targetAngle
+        val cur   = displayAngle % 360f
+        var delta = raw - cur
+        if (delta >  180f) delta -= 360f
+        if (delta < -180f) delta += 360f
+        displayAngle += delta
+    }
+
+    val animAngle by animateFloatAsState(
+        targetValue   = displayAngle,
+        animationSpec = spring(dampingRatio = 0.68f, stiffness = 220f),
+        label         = "wheel_needle"
     )
 
-    // Map cents to angle in radians: 0¢ = 12-o'clock (−90°), ±50¢ = ±60°
-    val centsToRad = { c: Float ->
-        val frac = c.coerceIn(-50f, 50f) / 50f
-        (frac * 60.0 - 90.0) * (PI / 180.0)
+    // Dial angle → Compose Canvas degrees (3-o'clock = 0, CW+)
+    // dialDeg 0 = 12-o'clock = -90° in Canvas, so canvasDeg = dialDeg - 90
+    fun dialToCanvas(d: Float) = d - 90f   // Compose drawArc startAngle convention
+
+    val paint = remember {
+        NativePaint(NativePaint.ANTI_ALIAS_FLAG).apply {
+            textAlign = NativePaint.Align.CENTER
+            typeface  = Typeface.DEFAULT_BOLD
+        }
     }
-    // Compose drawArc uses 3-o'clock = 0°, clockwise. The full ±60° arc
-    // starts at 210° (Compose) and spans 120°.
-    val centsToArcDeg = { c: Float -> 210f + (c + 50f) / 100f * 120f }
 
     Canvas(modifier = modifier) {
         val cx     = size.width  / 2f
-        val cy     = size.height / 2f + size.height * 0.12f
-        val radius = minOf(size.width, size.height) / 2f - 8.dp.toPx()
+        val cy     = size.height / 2f
+        val outerR = minOf(cx, cy) - 4.dp.toPx()
 
-        // Backplate
-        drawCircle(Color.Black.copy(alpha = 0.55f), radius = radius, center = Offset(cx, cy))
-        drawCircle(
-            color  = Color.White.copy(alpha = 0.25f), radius = radius, center = Offset(cx, cy),
-            style  = Stroke(width = 2.dp.toPx())
-        )
+        // Segment band metrics
+        val segArcR = outerR - 10.dp.toPx()
+        val segArcW = 26.dp.toPx()
+        val segInner = segArcR - segArcW / 2f - 2.dp.toPx()
 
-        // Color bands
-        val bandR      = radius - 6.dp.toPx()
-        val bandStroke = Stroke(width = 10.dp.toPx(), cap = StrokeCap.Butt)
-        listOf(
-            Triple(-50f, -15f, Color.Red),
-            Triple(-15f,  -5f, Color.Yellow),
-            Triple(  -5f,  5f, Color.Green),
-            Triple(   5f, 15f, Color.Yellow),
-            Triple(  15f, 50f, Color.Red)
-        ).forEach { (a, b, color) ->
+        // Inner ±50¢ ring metrics
+        val centsArcR = segInner - 10.dp.toPx()
+        val centsArcW = 10.dp.toPx()
+
+        // ── Background disc ──
+        drawCircle(Color.Black.copy(alpha = 0.70f), radius = outerR, center = Offset(cx, cy))
+        drawCircle(Color.White.copy(alpha = 0.10f), radius = outerR, center = Offset(cx, cy),
+            style = Stroke(width = 1.5.dp.toPx()))
+
+        // ── 12 Note segments ──
+        for (i in 0 until 12) {
+            val isActive  = (i == noteIndex && detected)
+            val midDial   = i * 30f
+            val startDial = midDial - 15f
+            val isNatural = !noteNames[i].contains("#")
+
+            // Segment colour
+            val segColor = when {
+                isActive && abs(cents) < 5f  -> Color(0xFF2EE16B)
+                isActive && abs(cents) < 15f -> Color(0xFFFFD210)
+                isActive                     -> Color(0xFFFF4747)
+                isNatural                    -> Color.White.copy(alpha = 0.13f)
+                else                         -> Color.White.copy(alpha = 0.07f)
+            }
+
+            // Segment arc (30° each)
             drawArc(
-                color      = color.copy(alpha = 0.55f),
-                startAngle = centsToArcDeg(a),
-                sweepAngle = (b - a) / 100f * 120f,
+                color      = segColor,
+                startAngle = dialToCanvas(startDial),
+                sweepAngle = 30f,
                 useCenter  = false,
-                topLeft    = Offset(cx - bandR, cy - bandR),
-                size       = Size(bandR * 2f, bandR * 2f),
-                style      = bandStroke
+                topLeft    = Offset(cx - segArcR, cy - segArcR),
+                size       = Size(segArcR * 2f, segArcR * 2f),
+                style      = Stroke(width = segArcW, cap = StrokeCap.Butt)
             )
-        }
 
-        // Tick marks every 5¢
-        for (c in -50..50 step 5) {
-            val isMajor = c % 25 == 0
-            val isMid   = c % 10 == 0
-            val inner   = radius - (if (isMajor) 26 else if (isMid) 20 else 14).dp.toPx()
-            val outer   = radius - 6.dp.toPx()
-            val angle   = centsToRad(c.toFloat())
-            val cosA    = cos(angle).toFloat()
-            val sinA    = sin(angle).toFloat()
+            // Divider line at segment boundary
+            val divDial = dialToCanvas(midDial + 15f)
+            val divRad  = divDial * (PI / 180.0)
+            val dOuter  = segArcR + segArcW / 2f + 2.dp.toPx()
+            val dInner  = segArcR - segArcW / 2f - 2.dp.toPx()
             drawLine(
-                color       = Color.White.copy(alpha = if (isMajor) 0.95f else if (isMid) 0.7f else 0.45f),
-                start       = Offset(cx + cosA * inner, cy + sinA * inner),
-                end         = Offset(cx + cosA * outer, cy + sinA * outer),
-                strokeWidth = (if (isMajor) 2.2f else if (isMid) 1.6f else 1.0f).dp.toPx(),
+                color       = Color.Black.copy(alpha = 0.80f),
+                start       = Offset(cx + cos(divRad).toFloat() * dInner,
+                                     cy + sin(divRad).toFloat() * dInner),
+                end         = Offset(cx + cos(divRad).toFloat() * dOuter,
+                                     cy + sin(divRad).toFloat() * dOuter),
+                strokeWidth = 3.dp.toPx(),
+                cap         = StrokeCap.Butt
+            )
+
+            // Centre tick inside segment
+            val midRad  = dialToCanvas(midDial) * (PI / 180.0)
+            val tOuter  = segArcR - segArcW / 2f - 4.dp.toPx()
+            val tInner  = tOuter - (if (isActive) 14.dp.toPx() else 8.dp.toPx())
+            drawLine(
+                color       = Color.White.copy(alpha = if (isActive) 1f else 0.35f),
+                start       = Offset(cx + cos(midRad).toFloat() * tInner,
+                                     cy + sin(midRad).toFloat() * tInner),
+                end         = Offset(cx + cos(midRad).toFloat() * tOuter,
+                                     cy + sin(midRad).toFloat() * tOuter),
+                strokeWidth = (if (isActive) 2.5f else 1.2f).dp.toPx(),
                 cap         = StrokeCap.Round
             )
+
+            // Note label
+            val labelR    = outerR * 0.58f
+            val labelRad  = dialToCanvas(midDial) * (PI / 180.0)
+            val labelX    = cx + cos(labelRad).toFloat() * labelR
+            val labelY    = cy + sin(labelRad).toFloat() * labelR
+            val labelSize = (if (isNatural) 15f else 11f).dp.toPx()
+
+            paint.textSize  = labelSize
+            paint.color = when {
+                isActive && abs(cents) < 5f  -> android.graphics.Color.parseColor("#2EE16B")
+                isActive && abs(cents) < 15f -> android.graphics.Color.parseColor("#FFD210")
+                isActive                     -> android.graphics.Color.parseColor("#FF4747")
+                isNatural                    -> android.graphics.Color.argb(153, 255, 255, 255)
+                else                         -> android.graphics.Color.argb(97, 255, 255, 255)
+            }
+            drawContext.canvas.nativeCanvas.drawText(
+                noteNames[i], labelX, labelY + labelSize / 3f, paint
+            )
         }
 
-        // Needle
-        val needleAngle = centsToRad(animatedCents)
-        val cosN = cos(needleAngle).toFloat()
-        val sinN = sin(needleAngle).toFloat()
-        val tipR = radius - 14.dp.toPx(); val tailR = 18.dp.toPx()
+        // ── Inner ±50¢ colour-zone arc (centred on active note) ──
+        if (detected && noteIndex >= 0) {
+            val midDial = noteIndex * 30f
+            data class CZone(val fromC: Float, val toC: Float, val col: Color)
+            listOf(
+                CZone(-50f, -15f, Color(0xFFFF4747).copy(alpha = 0.80f)),
+                CZone(-15f,  -5f, Color(0xFFFFD210).copy(alpha = 0.80f)),
+                CZone( -5f,   5f, Color(0xFF2EE16B).copy(alpha = 0.95f)),
+                CZone(  5f,  15f, Color(0xFFFFD210).copy(alpha = 0.80f)),
+                CZone( 15f,  50f, Color(0xFFFF4747).copy(alpha = 0.80f)),
+            ).forEach { z ->
+                val sAngle = dialToCanvas(midDial + z.fromC / 50f * 15f)
+                val sweep  = (z.toC - z.fromC) / 50f * 15f
+                drawArc(
+                    color      = z.col,
+                    startAngle = sAngle,
+                    sweepAngle = sweep,
+                    useCenter  = false,
+                    topLeft    = Offset(cx - centsArcR, cy - centsArcR),
+                    size       = Size(centsArcR * 2f, centsArcR * 2f),
+                    style      = Stroke(width = centsArcW, cap = StrokeCap.Butt)
+                )
+            }
+
+            // Tick marks at ±50, ±25, 0¢ within the active segment
+            for (c in listOf(-50f, -25f, 0f, 25f, 50f)) {
+                val isZero = c == 0f
+                val tRad   = dialToCanvas(noteIndex * 30f + c / 50f * 15f) * (PI / 180.0)
+                val tOut   = centsArcR + centsArcW / 2f + 2.dp.toPx()
+                val tIn    = centsArcR - centsArcW / 2f - (if (isZero) 6.dp.toPx() else 3.dp.toPx())
+                drawLine(
+                    color       = Color.White.copy(alpha = if (isZero) 0.85f else 0.50f),
+                    start       = Offset(cx + cos(tRad).toFloat() * tIn,
+                                         cy + sin(tRad).toFloat() * tIn),
+                    end         = Offset(cx + cos(tRad).toFloat() * tOut,
+                                         cy + sin(tRad).toFloat() * tOut),
+                    strokeWidth = (if (isZero) 2.2f else 1.2f).dp.toPx(),
+                    cap         = StrokeCap.Round
+                )
+            }
+        }
+
+        // ── Hub disc ──
+        val hubR = outerR * 0.22f
+        drawCircle(Color(0xFF111111), radius = hubR, center = Offset(cx, cy))
+        drawCircle(Color.White.copy(alpha = 0.14f), radius = hubR, center = Offset(cx, cy),
+            style = Stroke(width = 1.dp.toPx()))
+
+        // ── Needle ──
+        val needleRad = dialToCanvas(animAngle) * (PI / 180.0)
+        val cosN = cos(needleRad).toFloat()
+        val sinN = sin(needleRad).toFloat()
+        val tipLen  = segInner * 0.88f
+        val tailLen = 13.dp.toPx()
+        val nc = when {
+            !detected -> Color.Gray.copy(alpha = 0.35f)
+            inTune    -> Color(0xFF2EE16B)
+            else      -> Color.White
+        }
         drawLine(
-            color       = if (detected) (if (inTune) Color.Green else Color.White) else Color.Gray.copy(alpha = 0.55f),
-            start       = Offset(cx - cosN * tailR, cy - sinN * tailR),
-            end         = Offset(cx + cosN * tipR,  cy + sinN * tipR),
-            strokeWidth = 3.5f.dp.toPx(),
+            color       = nc,
+            start       = Offset(cx - cosN * tailLen, cy - sinN * tailLen),
+            end         = Offset(cx + cosN * tipLen,  cy + sinN * tipLen),
+            strokeWidth = 3.dp.toPx(),
             cap         = StrokeCap.Round
         )
 
-        // Center pivot
-        val pivotR = 9.dp.toPx()
-        drawCircle(Color(0xFFFFA500), radius = pivotR, center = Offset(cx, cy))
-        drawCircle(
-            color  = Color.White.copy(alpha = 0.85f), radius = pivotR, center = Offset(cx, cy),
-            style  = Stroke(width = 1.5f.dp.toPx())
-        )
+        // ── Pivot dot ──
+        val pivR = 7.dp.toPx()
+        drawCircle(Color(0xFFFFA500), radius = pivR, center = Offset(cx, cy))
+        drawCircle(Color.White.copy(alpha = 0.75f), radius = pivR,
+            center = Offset(cx, cy), style = Stroke(width = 1.5.dp.toPx()))
     }
 }
 
@@ -1397,11 +1558,12 @@ private fun TunerDial(
 // ------------------------------
 @Composable
 fun TunerScreen() {
-    val frequency  by TunerManager.frequency.collectAsState()
-    val noteName   by TunerManager.noteName.collectAsState()
-    val cents      by TunerManager.cents.collectAsState()
-    val detected   by TunerManager.detected.collectAsState()
-    val inputLevel by TunerManager.inputLevel.collectAsState()
+    val frequency    by TunerManager.frequency.collectAsState()
+    val noteName     by TunerManager.noteName.collectAsState()
+    val cents        by TunerManager.cents.collectAsState()
+    val detected     by TunerManager.detected.collectAsState()
+    val inputLevel   by TunerManager.inputLevel.collectAsState()
+    val centsHistory by TunerManager.centsHistory.collectAsState()
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -1409,82 +1571,292 @@ fun TunerScreen() {
 
     LaunchedEffect(Unit) { launcher.launch(Manifest.permission.RECORD_AUDIO) }
 
-    val inTune     = detected && abs(cents) < 5f
-    val centsColor = when {
-        !detected       -> Color(0xFFAAAAAA)
-        abs(cents) < 5f  -> Color.Green
-        abs(cents) < 15f -> Color.Yellow
-        else            -> Color.Red
-    }
+    val inTune  = detected && abs(cents) < 5f
+    val isFlat  = detected && cents < -5f
+    val isSharp = detected && cents >  5f
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color.Blue.copy(alpha = 0.6f), Color(0xFF800080).copy(alpha = 0.8f))
-                )
-            )
-            .padding(16.dp),
+            .background(Color(0xFF121212))
+            .padding(horizontal = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.height(20.dp))
-        Text("Tuner", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text      = "Sing or play a sustained note.\nTanpura is paused while you tune.",
-            color     = Color(0xFFDDDDDD),
-            fontSize  = 13.sp,
-            textAlign = TextAlign.Center
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // ── Header ──
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("CHROMATIC TUNER", color = Color(0xFF555555), fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold, letterSpacing = 2.sp)
+            Text("A₄ = 440 Hz", color = Color(0xFFFFA500), fontSize = 11.sp,
+                fontWeight = FontWeight.Medium)
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // ── InsTuner-style Tuning Status Card ──
+        TuningStatusCard(
+            noteName = noteName,
+            cents    = cents,
+            detected = detected,
+            inTune   = inTune,
+            isFlat   = isFlat,
+            isSharp  = isSharp,
+            modifier = Modifier.fillMaxWidth().height(130.dp)
         )
+
         Spacer(modifier = Modifier.height(8.dp))
 
+        // ── 360° Chromatic Wheel ──
         TunerDial(
+            noteName = noteName,
             cents    = cents,
             inTune   = inTune,
             detected = detected,
-            modifier = Modifier.width(280.dp).height(280.dp)
+            modifier = Modifier.fillMaxWidth().aspectRatio(1f)
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // Note name
-        Text(
-            text       = if (detected) noteName else "—",
-            color      = Color.White,
-            fontSize   = 44.sp,
-            fontWeight = FontWeight.ExtraBold
-        )
-        // Cents offset
-        Text(
-            text      = if (detected) String.format(Locale.getDefault(), "%+.0f cents", cents) else "listening…",
-            color     = centsColor,
-            fontSize  = 18.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-        // Frequency
-        Text(
-            text     = if (detected) String.format(Locale.getDefault(), "%.1f Hz", frequency) else " ",
-            color    = Color(0xFFAAAAAA),
-            fontSize = 13.sp
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Input level bar
+        // ── Input level bar ──
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp)
-                .height(6.dp)
-                .background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(3.dp))
+                .fillMaxWidth().padding(horizontal = 20.dp)
+                .height(5.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .background(Color.White.copy(alpha = 0.08f))
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxHeight()
                     .fillMaxWidth(inputLevel.coerceIn(0f, 1f))
-                    .background(Color(0xFFFFA500), RoundedCornerShape(3.dp))
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(Color(0xFF21D45A), Color(0xFFFFD210), Color(0xFFFF4040))
+                        ),
+                        RoundedCornerShape(3.dp)
+                    )
             )
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // ── Pitch history graph ──
+        TunerHistoryGraph(
+            history  = centsHistory,
+            modifier = Modifier.fillMaxWidth().height(66.dp)
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // ── Status dot ──
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Box(modifier = Modifier.size(6.dp).background(
+                if (detected) Color(0xFF21D45A) else Color(0xFF444444), CircleShape))
+            Spacer(modifier = Modifier.width(5.dp))
+            Text(
+                if (detected) "Signal detected" else "Listening for signal…",
+                color = Color(0xFF555555), fontSize = 11.sp, fontWeight = FontWeight.Medium
+            )
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+    }
+}
+
+// InsTuner-style status card:
+//  • Full green when in tune ("Got it! ✓")
+//  • Dark + left red bar when flat ("Tune Up ↑")
+//  • Dark + right red bar when sharp ("Tune Down ↓")
+//  • ♭ on left edge, # on right edge
+@Composable
+private fun TuningStatusCard(
+    noteName: String,
+    cents: Float,
+    detected: Boolean,
+    inTune: Boolean,
+    isFlat: Boolean,
+    isSharp: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val baseName    = noteName.takeWhile { !it.isDigit() && it != '-' }
+    val naturalNote = baseName.replace("#", "").replace("b", "")
+    val accidental  = when { baseName.contains("#") -> "♯"; baseName.contains("b") -> "♭"; else -> "" }
+    val octaveStr   = noteName.drop(baseName.length)
+
+    // Bar fraction proportional to out-of-tune amount (0–50¢ → 0–42% of card width)
+    val barFraction = (abs(cents).coerceIn(0f, 50f) / 50f * 0.42f)
+
+    val statusText = when {
+        !detected -> "Listening…"
+        inTune    -> "Got it! ✓"
+        isFlat    -> "Tune Up  ↑"
+        else      -> "Tune Down  ↓"
+    }
+
+    val bgColor = animateColorAsState(
+        targetValue = if (inTune) Color(0xFF1DB954) else Color(0xFF1C1C1C),
+        animationSpec = tween(durationMillis = 250),
+        label = "card_bg"
+    ).value
+
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(bgColor)
+    ) {
+        // Red direction bar
+        if (detected && !inTune) {
+            val animBar by animateFloatAsState(
+                targetValue   = barFraction,
+                animationSpec = tween(80),
+                label         = "bar"
+            )
+            if (isFlat) {
+                // Left red bar (too flat)
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(animBar)
+                        .align(Alignment.CenterStart)
+                        .background(
+                            Color(0xFFE03030).copy(alpha = 0.82f),
+                            RoundedCornerShape(topStart = 14.dp, bottomStart = 14.dp)
+                        )
+                )
+            } else {
+                // Right red bar (too sharp)
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(animBar)
+                        .align(Alignment.CenterEnd)
+                        .background(
+                            Color(0xFFE03030).copy(alpha = 0.82f),
+                            RoundedCornerShape(topEnd = 14.dp, bottomEnd = 14.dp)
+                        )
+                )
+            }
+        }
+
+        // ♭ / # edge labels
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("♭", color = Color.White.copy(alpha = if (isFlat) 1f else 0.25f),
+                fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text("#", color = Color.White.copy(alpha = if (isSharp) 1f else 0.25f),
+                fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
+
+        // Note name + octave + status text
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Row(verticalAlignment = Alignment.Top) {
+                Text(
+                    text = if (detected) naturalNote else "—",
+                    color = Color.White,
+                    fontSize = 72.sp,
+                    fontWeight = FontWeight.Black,
+                    lineHeight = 72.sp
+                )
+                if (detected) {
+                    Column(modifier = Modifier.padding(top = 10.dp)) {
+                        if (accidental.isNotEmpty()) {
+                            Text(accidental, color = Color.White,
+                                fontSize = 26.sp, fontWeight = FontWeight.Bold,
+                                lineHeight = 26.sp)
+                        }
+                        if (octaveStr.isNotEmpty()) {
+                            Text(octaveStr, color = Color.White.copy(alpha = 0.75f),
+                                fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
+                                lineHeight = 20.sp)
+                        }
+                    }
+                }
+            }
+            Text(
+                text = statusText,
+                color = Color.White.copy(alpha = 0.88f),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+
+        // Cents badge bottom-right
+        if (detected) {
+            Text(
+                text = String.format(Locale.getDefault(), "%+.0f¢", cents),
+                color = Color.White.copy(alpha = 0.55f),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp)
+            )
+        }
+    }
+}
+
+// Pitch history graph — scrolling line chart matching iOS PitchHistoryGraph
+@Composable
+private fun TunerHistoryGraph(history: List<Float>, modifier: Modifier = Modifier) {
+    Box(modifier = modifier) {
+        Canvas(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp))) {
+            val w    = size.width
+            val h    = size.height
+            val midY = h / 2f
+            val range = 50f
+
+            // Background
+            drawRect(Color.Black.copy(alpha = 0.28f))
+
+            // ±15¢ yellow band
+            val y15t = midY - h / 2f * (15f / range)
+            val band15H = h / 2f * (15f / range) * 2f
+            drawRect(Color(0xFFFFD210).copy(alpha = 0.07f), topLeft = Offset(0f, y15t), size = Size(w, band15H))
+
+            // ±5¢ green band
+            val y5t = midY - h / 2f * (5f / range)
+            val band5H = h / 2f * (5f / range) * 2f
+            drawRect(Color(0xFF2EE16B).copy(alpha = 0.12f), topLeft = Offset(0f, y5t), size = Size(w, band5H))
+
+            // Centre line
+            drawLine(Color.White.copy(alpha = 0.18f), Offset(0f, midY), Offset(w, midY), strokeWidth = 1f)
+
+            // Pitch trace — break at NaN
+            if (history.isEmpty()) return@Canvas
+            val cnt   = history.size
+            val xStep = w / maxOf(cnt - 1, 1).toFloat()
+            val path  = androidx.compose.ui.graphics.Path()
+            var penDown = false
+            history.forEachIndexed { i, v ->
+                if (v.isNaN()) { penDown = false; return@forEachIndexed }
+                val x  = i * xStep
+                val cy = midY - (v.coerceIn(-range, range) / range) * (h / 2f)
+                if (penDown) path.lineTo(x, cy) else { path.moveTo(x, cy); penDown = true }
+            }
+            drawPath(path, Color.White.copy(alpha = 0.88f),
+                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
+        // Labels row
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 3.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("+50¢", color = Color.White.copy(alpha = 0.28f), fontSize = 8.sp)
+            Text("PITCH HISTORY", color = Color.White.copy(alpha = 0.28f), fontSize = 8.sp, letterSpacing = 1.sp)
+            Text("-50¢", color = Color.White.copy(alpha = 0.28f), fontSize = 8.sp)
         }
     }
 }

@@ -564,29 +564,40 @@ final class AudioManager: NSObject {
             guard !self.metronomeRunning else { return }
             self.metronomeRunning = true
             self.metronomePlayer.volume = self.metronomeVolume
-            if !self.metronomePlayer.isPlaying {
-                self.metronomePlayer.play()
-            }
-            self.scheduleNextMetronomeTick()
+            if !self.metronomePlayer.isPlaying { self.metronomePlayer.play() }
+            self.tickMetronome()               // first click immediately
+            self.scheduleNextMetronomeTick()   // arm the repeating chain
         }
     }
 
-    // Single-fire self-rescheduling timer. Each tick reads the current BPM
-    // so tempo changes take effect at the very next beat — no dead-time caused
-    // by re-setting a repeating timer's deadline on every slider drag.
+    // Arms a single-fire DispatchSource for the next beat.  When it fires
+    // it plays the click and immediately arms the following beat, reading
+    // metronomeBPM fresh each time so slider changes take effect on the very
+    // next tick without any rescheduling.
+    //
+    // Key rules that avoid the old bug:
+    //  • The event handler NEVER touches metronomeTimer — doing so from inside
+    //    a DispatchSource's own handler is undefined behaviour (the source has
+    //    no other strong owner and can be deallocated mid-execution).
+    //  • The old timer is cancelled only after its replacement is armed and
+    //    stored, so there is never a gap in the timer chain.
     private func scheduleNextMetronomeTick() {
         guard metronomeRunning else { return }
-        tickMetronome()
         let interval = 60.0 / Double(metronomeBPM)
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + interval)
-        timer.setEventHandler { [weak self] in
+        let next = DispatchSource.makeTimerSource(queue: queue)
+        next.schedule(deadline: .now() + interval)
+        next.setEventHandler { [weak self] in
             guard let self = self else { return }
-            self.metronomeTimer = nil
+            // Click first so the beat is on time, then arm the next timer.
+            self.tickMetronome()
             self.scheduleNextMetronomeTick()
         }
-        timer.resume()
-        metronomeTimer = timer
+        next.resume()
+        // Replace — ARC will release the previous source only after the swap,
+        // so we are never inside the handler of a source we are releasing.
+        let previous = metronomeTimer
+        metronomeTimer = next
+        previous?.cancel()
     }
 
     func stopMetronome() {
