@@ -545,8 +545,19 @@ final class AudioManager: NSObject {
     func setMetronomeBPM(_ bpm: Float) {
         queue.async { [weak self] in
             guard let self = self else { return }
-            self.metronomeBPM = max(40, min(240, bpm))
-            // Timer reads metronomeBPM fresh on every tick, so no reschedule needed.
+            let clamped = max(40, min(240, bpm))
+            guard clamped != self.metronomeBPM else { return }
+            self.metronomeBPM = clamped
+
+            // Immediately reschedule the pending timer so the new tempo is felt
+            // on the very NEXT tick rather than having to wait out the remaining
+            // time on the old (potentially slow) interval.
+            // scheduleNextMetronomeTick() is safe to call here because we are
+            // NOT inside an existing timer's event handler — this runs from a
+            // plain queue.async block, so cancelling the old timer is safe.
+            if self.metronomeRunning {
+                self.scheduleNextMetronomeTick()
+            }
         }
     }
 
