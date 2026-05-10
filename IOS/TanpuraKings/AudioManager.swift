@@ -16,7 +16,9 @@ final class AudioManager: NSObject {
     // mixer, so it bypasses the reverb/delay/echo chain.
     private let metronomePlayer = AVAudioPlayerNode()
     private var metronomeFile: AVAudioFile?
-    private var metronomeTimer: DispatchSourceTimer?
+    // Each beat schedules the next via a DispatchWorkItem so the current BPM
+    // is always read fresh — no timer restart needed when the slider changes.
+    private var metronomeWorkItem: DispatchWorkItem?
     private var metronomeRunning = false
     private var metronomeBPM: Float = 80
     private var metronomeVolume: Float = 0.7
@@ -566,11 +568,9 @@ final class AudioManager: NSObject {
             let clamped = max(40, min(240, bpm))
             guard clamped != self.metronomeBPM else { return }
             self.metronomeBPM = clamped
-            // Restart the repeating timer at the new interval so the very
-            // next beat already reflects the change.
-            if self.metronomeRunning {
-                self.startMetronomeTimer()
-            }
+            // No timer restart needed — scheduleNextBeat() reads metronomeBPM
+            // fresh on every beat, so the new tempo takes effect automatically
+            // at the next beat boundary without interrupting the current count.
         }
     }
 
@@ -589,49 +589,45 @@ final class AudioManager: NSObject {
             self.metronomeRunning = true
             self.metronomePlayer.volume = self.metronomeVolume
             if !self.metronomePlayer.isPlaying { self.metronomePlayer.play() }
-            self.tickMetronome()        // first click immediately
-            self.startMetronomeTimer() // arm repeating timer for subsequent beats
+            // Bump generation to invalidate any lingering work item from a
+            // previous run, then fire the first click immediately.
+            self.metronomeGeneration += 1
+            self.tickMetronome()
+            self.scheduleNextBeat()
         }
     }
 
-    // Creates a REPEATING DispatchSourceTimer at the current BPM.
-    // A generation counter is captured in the event handler closure; when BPM
-    // changes, we bump the counter and replace the timer.  Any event that was
-    // already queued from the old timer sees a stale generation and returns
-    // without doing anything — no double-chain, no double-click.
-    private func startMetronomeTimer() {
-        // Bump first so any in-flight event from the old timer is silenced.
-        metronomeGeneration += 1
-        let gen = metronomeGeneration
-
-        metronomeTimer?.cancel()
-        metronomeTimer = nil
+    // Schedules one DispatchWorkItem for the next beat using the CURRENT
+    // metronomeBPM value.  The work item fires the click, then calls this
+    // function again — forming a self-rescheduling chain.
+    //
+    // Because each link in the chain reads metronomeBPM fresh, a slider drag
+    // is picked up at the very next beat with zero timer restarts or debounce.
+    private func scheduleNextBeat() {
+        metronomeWorkItem?.cancel()
+        metronomeWorkItem = nil
 
         guard metronomeRunning else { return }
 
+        let gen        = metronomeGeneration
         let intervalMs = max(1, Int(60_000.0 / Double(metronomeBPM)))
-        let interval   = DispatchTimeInterval.milliseconds(intervalMs)
 
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        // Repeating — no self-rescheduling needed, which was the root cause
-        // of the old double-chain bug.
-        timer.schedule(deadline: .now() + interval, repeating: interval,
-                       leeway: .milliseconds(2))
-        timer.setEventHandler { [weak self] in
+        let item = DispatchWorkItem { [weak self] in
             guard let self = self, self.metronomeGeneration == gen else { return }
             self.tickMetronome()
+            self.scheduleNextBeat()
         }
-        timer.resume()
-        metronomeTimer = timer
+        metronomeWorkItem = item
+        queue.asyncAfter(deadline: .now() + .milliseconds(intervalMs), execute: item)
     }
 
     func stopMetronome() {
         queue.async { [weak self] in
             guard let self = self else { return }
-            // Bump generation before cancel so any already-queued event is a no-op.
+            // Bump generation so any queued work item is a no-op when it fires.
             self.metronomeGeneration += 1
-            self.metronomeTimer?.cancel()
-            self.metronomeTimer = nil
+            self.metronomeWorkItem?.cancel()
+            self.metronomeWorkItem = nil
             self.metronomePlayer.stop()
             self.metronomeRunning = false
         }
@@ -828,8 +824,9 @@ final class AudioManager: NSObject {
             guard let self = self else { return }
             self.watchdog?.cancel()
             self.watchdog = nil
-            self.metronomeTimer?.cancel()
-            self.metronomeTimer = nil
+            self.metronomeGeneration += 1
+            self.metronomeWorkItem?.cancel()
+            self.metronomeWorkItem = nil
             self.metronomePlayer.stop()
             self.metronomeRunning = false
             for (_, note) in self.activeNotes {
