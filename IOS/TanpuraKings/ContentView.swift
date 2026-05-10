@@ -110,6 +110,10 @@ struct DroneView: View {
 
     private var isIPad: Bool { hSizeClass == .regular }
 
+    /// Tracks when the first note began playing so the timer can count up.
+    /// Set to nil when all notes stop (resets the clock).
+    @State private var playbackStart: Date? = nil
+
     // MARK: - Body
 
     var body: some View {
@@ -119,6 +123,13 @@ struct DroneView: View {
                 iPadLayout
             } else {
                 phoneLayout
+            }
+        }
+        .onChange(of: activeNotes) { _, notes in
+            if notes.isEmpty {
+                playbackStart = nil          // all stopped → reset
+            } else if playbackStart == nil {
+                playbackStart = Date()       // first note → start clock
             }
         }
         .onChange(of: masterVolume)    { _, v   in AudioManager.shared.updateMasterVolume(v) }
@@ -160,6 +171,7 @@ struct DroneView: View {
             VStack(spacing: 16) {
                 Spacer().frame(height: 20)
                 logoHeader(iconSize: 96, fontSize: 24)
+                PlaybackTimerView(startDate: playbackStart)
                 AudioOutputButton()
                 PianoView(
                     activeNotes: $activeNotes,
@@ -209,6 +221,7 @@ struct DroneView: View {
                 VStack(spacing: 16) {
                     Spacer().frame(height: 20)
                     logoHeader(iconSize: 120, fontSize: 30)
+                    PlaybackTimerView(startDate: playbackStart)
                     AudioOutputButton()
                     PianoView(
                         activeNotes: $activeNotes,
@@ -301,6 +314,60 @@ struct DroneView: View {
 
     private func pushEQ() {
         AudioManager.shared.updateEQ(low: eqLow, mid: eqMid, high: eqHigh)
+    }
+}
+
+// MARK: - Playback timer
+
+/// Pill-shaped badge that counts up from the moment the first note starts
+/// playing. Resets to 00:00 (greyed out) when all notes are stopped.
+/// Uses TimelineView so the count advances every second without any manual
+/// timer management — SwiftUI drives it automatically.
+private struct PlaybackTimerView: View {
+    let startDate: Date?
+
+    var body: some View {
+        if let start = startDate {
+            TimelineView(.periodic(from: start, by: 1.0)) { ctx in
+                let elapsed = max(0, Int(ctx.date.timeIntervalSince(start)))
+                badge(time: Self.format(elapsed), active: true)
+            }
+        } else {
+            badge(time: "00:00", active: false)
+        }
+    }
+
+    @ViewBuilder
+    private func badge(time: String, active: Bool) -> some View {
+        HStack(spacing: 8) {
+            // Pulsing green dot when playing, dim grey when stopped
+            Circle()
+                .fill(active
+                      ? Color(red: 0.13, green: 0.80, blue: 0.35)
+                      : Color.white.opacity(0.25))
+                .frame(width: 9, height: 9)
+
+            Text(active ? "Playing" : "Stopped")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(active ? .white : .white.opacity(0.35))
+
+            Text(time)
+                .font(.system(size: 20, weight: .bold).monospacedDigit())
+                .foregroundColor(active ? .white : .white.opacity(0.35))
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 9)
+        .background(Color.black.opacity(0.42))
+        .clipShape(Capsule())
+    }
+
+    private static func format(_ total: Int) -> String {
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        return h > 0
+            ? String(format: "%d:%02d:%02d", h, m, s)
+            : String(format: "%02d:%02d", m, s)
     }
 }
 

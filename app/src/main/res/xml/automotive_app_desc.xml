@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Declares that this app supports Android Auto media browsing.
+    Parsed by the Android Auto host app (and Google Play) to determine
+    which Auto features this app provides.
+    Reference: https://developer.android.com/training/cars/media
+-->
+<automotiveApp>
+    <uses name="media"/>
+</automotiveApp>

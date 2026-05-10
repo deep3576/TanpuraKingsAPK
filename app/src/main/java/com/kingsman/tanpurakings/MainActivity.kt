@@ -4,6 +4,9 @@ import android.content.Context
 import android.graphics.Paint as NativePaint
 import android.graphics.Typeface
 import android.content.Intent
+import android.support.v4.media.MediaMetadataCompat
+import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
@@ -63,7 +66,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -82,16 +87,19 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import android.Manifest
+import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder as AndroidMediaRecorder
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresPermission
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -103,9 +111,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import androidx.core.graphics.toColorInt
 
 private const val MAX_ACTIVE_NOTES = 3
 private const val CROSSFADE_MS = 600L   // overlap window between old and new player
@@ -126,7 +136,11 @@ object AudioManager {
 
     // SoundPool used only for transient echo/delay/reverb copies
     private lateinit var soundPool: SoundPool
-    private val noteSoundIds  = ConcurrentHashMap<String, Int>()
+    // noteSoundIds removed — SoundPool.load() decompresses each file to PCM
+    // and holds it in memory indefinitely.  The notes never actually use
+    // soundPool.play(); effects are all MediaPlayer-based (buildPlayer).
+    // Removing these loads matches the iOS lazy-buffer fix and prevents the
+    // same OOM crash pattern on Android.
     private val noteDurations = ConcurrentHashMap<String, Long>()   // ms, fetched async
 
     private val echoJobs       = mutableMapOf<String, Job>()
@@ -173,6 +187,12 @@ object AudioManager {
 
     // Stereo width: 0.0 = all notes panned center, 1.0 = full spread.
     private var stereoWidth: Float = 0.5f
+
+    // MediaSession — enables lock-screen / headphone / steering-wheel controls
+    // and is the bridge to Android Auto in Phase 2.
+    private var mediaSession: MediaSessionCompat? = null
+    /** Exposed so AudioPlaybackService can attach it to the notification style. */
+    val mediaSessionToken: MediaSessionCompat.Token? get() = mediaSession?.sessionToken
 
     // Metronome
     private var clickSoundId: Int = 0
@@ -240,15 +260,18 @@ object AudioManager {
         }
 
         isInitialized = true
+        setupMediaSession()
 
-        // Load sound IDs + durations on IO so init() returns instantly
+        // Fetch note durations (header-only read, no PCM in memory) and load
+        // only the metronome click into SoundPool (it's a tiny transient file).
+        // Note files are NOT loaded into SoundPool — they were never played via
+        // soundPool.play() and decompressing 12 large MP3s to PCM caused OOM.
         coroutineScope?.launch(Dispatchers.IO) {
             val keys = listOf("c","csharp","d","dsharp","e","f","fsharp","g","gsharp","a","asharp","b")
             val retriever = MediaMetadataRetriever()
             for (key in keys) {
                 try {
                     val afd = context.applicationContext.assets.openFd("Audio/$key.mp3")
-                    noteSoundIds[key] = soundPool.load(afd, 1)
                     retriever.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
                     retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                         ?.toLongOrNull()
@@ -256,10 +279,11 @@ object AudioManager {
                         ?.let { noteDurations[key] = it }
                     afd.close()
                 } catch (e: Exception) {
-                    Log.e("AudioManager", "Load error: $key", e)
+                    Log.e("AudioManager", "Duration read error: $key", e)
                 }
             }
-            // Load metronome click into the same SoundPool.
+            retriever.release()
+            // Metronome click is a short transient — safe to keep in SoundPool.
             try {
                 val afd = context.applicationContext.assets.openFd("Audio/click.mp3")
                 clickSoundId = soundPool.load(afd, 1)
@@ -267,7 +291,6 @@ object AudioManager {
             } catch (e: Exception) {
                 Log.e("AudioManager", "Load error: click", e)
             }
-            retriever.release()
             Log.d("AudioManager", "Ready. Durations: $noteDurations")
         }
     }
@@ -548,6 +571,10 @@ object AudioManager {
             player.start()
             activePlayers[noteName] = player
             noteVolumes[noteName]   = noteVolume
+            updateMediaSession()
+            // Keep the process alive in the background.  Start the foreground
+            // service on the first note; subsequent notes are no-ops.
+            if (activePlayers.size == 1) startPlaybackService()
 
             // Attach a per-MediaPlayer Equalizer so EQ is applied to this note.
             attachEqualizer(player, noteName)
@@ -656,6 +683,10 @@ object AudioManager {
             runCatching { player.stop() }
             player.release()
         }
+        updateMediaSession()
+        // Stop the foreground service once the last note is gone so the
+        // persistent notification is dismissed.
+        if (activePlayers.isEmpty()) stopPlaybackService()
         // Re-spread the remaining notes immediately so their pan rebalances
         // as soon as the user taps off — no need to wait for the fade to finish.
         reapplyStereoSpread()
@@ -670,6 +701,8 @@ object AudioManager {
         equalizers.values.forEach { runCatching { it.release() } };  equalizers.clear()
         activePlayers.values.forEach { runCatching { it.stop() }; it.release() }
         activePlayers.clear(); noteVolumes.clear()
+        updateMediaSession()
+        stopPlaybackService()
     }
 
     fun updateEffects(
@@ -714,15 +747,22 @@ object AudioManager {
     }
 
     // Maps mix 0-100 to EnvironmentalReverb parameters with a sqrt curve so
-    // mid-range settings are clearly audible, not buried in the noise floor.
+    // even a small slider nudge is immediately audible.  Also scales decayTime
+    // and diffusion so high-mix values sound cavernous rather than just louder.
     private fun applyReverbLevel(mix: Float) {
         val er = envReverb ?: return
         if (mix <= 0f) { runCatching { er.enabled = false }; return }
         runCatching {
             val t = sqrt(mix / 100f)                             // 0..1, perceptually linear
-            er.roomLevel   = ((-9000f + t * 8500f).toInt()).coerceIn(-9000, 0).toShort()
-            er.reverbLevel = ((-5000f + t * 7000f).toInt()).coerceIn(-9000, 2000).toShort()
-            er.enabled     = true
+            // All values at 2× rate — reaches max at t = 0.5 (half-slider)
+            er.roomLevel         = ((-9000f + t * 18000f).toInt()).coerceIn(-9000, 0).toShort()
+            er.reverbLevel       = ((-4000f + t * 12000f).toInt()).coerceIn(-9000, 2000).toShort()
+            // Decay: 1 s → 20 s range, 2× previous 1–6 s
+            er.decayTime         = (1000 + (t * 19000f).toInt()).coerceIn(100, 20000)
+            // Diffusion/density reach max at half-slider
+            er.diffusion         = (700 + (t * 600f).toInt()).coerceIn(0, 1000).toShort()
+            er.density           = (700 + (t * 600f).toInt()).coerceIn(0, 1000).toShort()
+            er.enabled           = true
         }
     }
 
@@ -734,32 +774,152 @@ object AudioManager {
     ) {
         if (echoMix <= 0f && delayMix <= 0f) return
         echoJobs[noteName] = launch {
-            // Echo: up to 4 decaying looping copies, each offset by echoDelayMs.
+            // Echo: up to 6 decaying looping copies, each offset by echoDelayMs.
+            // Decay factor 0.68 keeps each tap at 68 % of the previous, so
+            // tap-6 is still at ~10 % — clearly audible on a tanpura drone.
+            // (Old factor 0.50 dropped tap-4 to <7 %, barely perceptible.)
             if (echoMix > 0f) launch {
-                var tapVol  = (volume * echoMix.coerceAtMost(1f)).coerceIn(0f, 1f)
+                var tapVol  = (volume * echoMix * 2f).coerceIn(0f, 1f)  // 2× previous
                 var tapNum  = 0
-                while (tapNum < 4 && tapVol >= 0.04f) {
+                while (tapNum < 6 && tapVol >= 0.03f) {
                     delay(echoDelayMs.toLong())
                     if (!isActive) break
                     val ep = buildPlayer(fileKey, tapVol, pitch) ?: break
                     ep.isLooping = true
                     ep.start()
                     effectPlayers.getOrPut(noteName) { mutableListOf() }.add(ep)
-                    tapVol *= 0.50f
+                    tapVol *= 0.68f   // slower decay — was 0.50
                     tapNum++
                 }
             }
             // Delay: a single looping copy that starts after delayTimeMs.
+            // Scale by 1.2 so the tap is noticeably louder than before —
+            // clamped to 1.0 so we don't clip.
             if (delayMix > 0f) launch {
                 delay(delayTimeMs.toLong())
                 if (!isActive) return@launch
-                val tapVol = (volume * delayMix).coerceIn(0f, 1f)
+                val tapVol = (volume * delayMix * 2.4f).coerceIn(0f, 1f)  // 2× previous 1.2
                 val ep = buildPlayer(fileKey, tapVol, pitch) ?: return@launch
                 ep.isLooping = true
                 ep.start()
                 effectPlayers.getOrPut(noteName) { mutableListOf() }.add(ep)
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // MediaSession — lock screen / headphone / steering-wheel controls
+    // -------------------------------------------------------------------------
+
+    private fun setupMediaSession() {
+        val ctx = appContext ?: return
+        val session = MediaSessionCompat(ctx, "TanpuraKings").apply {
+            // setFlags() is deprecated — FLAG_HANDLES_MEDIA_BUTTONS and
+            // FLAG_HANDLES_TRANSPORT_CONTROLS are set implicitly by setCallback().
+            setCallback(object : MediaSessionCompat.Callback() {
+                /** Stop is the only command we fully support — the user must
+                 *  open the app to choose which note to start playing. */
+                override fun onStop()  { stopAllNotes() }
+                override fun onPause() { stopAllNotes() }
+                override fun onMediaButtonEvent(intent: Intent): Boolean {
+                    // Let MediaButtonReceiver handle the routing; we rely on
+                    // onStop/onPause for the actual work.
+                    return super.onMediaButtonEvent(intent)
+                }
+
+                /**
+                 * Android Auto calls this when the user taps a browse item.
+                 * [mediaId] matches one of the note keys defined in
+                 * [TanpuraMediaBrowserService] ("c", "csharp", …, "b").
+                 */
+                override fun onPlayFromMediaId(mediaId: String?, extras: Bundle?) {
+                    val validKeys = listOf(
+                        "c","csharp","d","dsharp","e","f",
+                        "fsharp","g","gsharp","a","asharp","b"
+                    )
+                    if (mediaId != null && mediaId in validKeys) {
+                        playNote(mediaId, currentMasterVolume)
+                    }
+                }
+            })
+            // Initial state — nothing playing yet
+            setPlaybackState(
+                PlaybackStateCompat.Builder()
+                    .setState(PlaybackStateCompat.STATE_NONE, 0L, 1f)
+                    .build()
+            )
+            isActive = true
+        }
+        mediaSession = session
+    }
+
+    /**
+     * Refreshes the MediaSession playback state and metadata to match the
+     * current set of active notes. Call this whenever notes are added or removed.
+     */
+    private fun updateMediaSession() {
+        val session = mediaSession ?: return
+        val isPlaying = activePlayers.isNotEmpty()
+        val artist = activePlayers.keys.sorted()
+            .joinToString(" • ")
+            .ifEmpty { "Drone" }
+
+        session.setPlaybackState(
+            PlaybackStateCompat.Builder()
+                .setActions(
+                    PlaybackStateCompat.ACTION_STOP or
+                    PlaybackStateCompat.ACTION_PAUSE or
+                    PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                    PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID
+                )
+                .setState(
+                    if (isPlaying) PlaybackStateCompat.STATE_PLAYING
+                    else           PlaybackStateCompat.STATE_STOPPED,
+                    PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN,
+                    1f
+                )
+                .build()
+        )
+
+        session.setMetadata(
+            MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE,  "Tanpura Kings")
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM,  "Tanpura Drone")
+                // Duration unknown (continuous drone) — omit so the lock
+                // screen doesn't show a progress bar.
+                .build()
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Foreground-service lifecycle helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Start [AudioPlaybackService] so Android treats this process as a
+     * foreground service and won't kill it while audio is playing in the
+     * background.  Safe to call repeatedly — the service ignores duplicate
+     * start commands.
+     */
+    private fun startPlaybackService() {
+        val ctx = appContext ?: return
+        val intent = Intent(ctx, AudioPlaybackService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ctx.startForegroundService(intent)
+        } else {
+            ctx.startService(intent)
+        }
+    }
+
+    /**
+     * Stop [AudioPlaybackService] once no notes remain — dismisses the
+     * persistent notification and lets Android reclaim the foreground-service
+     * slot.
+     */
+    private fun stopPlaybackService() {
+        val ctx = appContext ?: return
+        ctx.stopService(Intent(ctx, AudioPlaybackService::class.java))
     }
 
     fun release() {
@@ -782,7 +942,10 @@ object AudioManager {
 
         runCatching { envReverb?.release() }; envReverb = null
         if (::soundPool.isInitialized) soundPool.release()
-        noteSoundIds.clear(); noteDurations.clear()
+        noteDurations.clear()
+        mediaSession?.isActive = false
+        mediaSession?.release()
+        mediaSession = null
         appContext    = null
         isInitialized = false
         Log.d("AudioManager", "AudioManager released")
@@ -804,6 +967,7 @@ object TunerManager {
     val frequency:    StateFlow<Float>        = _frequency.asStateFlow()
     val noteName:     StateFlow<String>       = _noteName.asStateFlow()
     val cents:        StateFlow<Float>        = _cents.asStateFlow()
+    @Suppress("unused")   // Public API — used by Android Auto / future callers
     val isListening:  StateFlow<Boolean>      = _isListening.asStateFlow()
     val inputLevel:   StateFlow<Float>        = _inputLevel.asStateFlow()
     val detected:     StateFlow<Boolean>      = _detected.asStateFlow()
@@ -820,6 +984,7 @@ object TunerManager {
     private const val SAMPLE_RATE = 44100
     private const val FRAME_SIZE  = 2048
 
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun start() {
         if (_isListening.value) return
         val minBuf  = AudioRecord.getMinBufferSize(
@@ -1349,7 +1514,7 @@ private fun TunerDial(
 
     // Animate the needle angle (unwrapped degrees, shortest-path)
     // Each note = 30°; ±50¢ → ±15° within its slot.
-    val targetAngle = if (noteIndex >= 0 && detected) {
+    val targetAngle = if (noteIndex >= 0) {
         noteIndex * 30f + (cents.coerceIn(-50f, 50f) / 50f) * 15f
     } else 0f
 
@@ -1358,9 +1523,8 @@ private fun TunerDial(
     // Shortest-path update whenever target changes
     LaunchedEffect(noteIndex, cents, detected) {
         if (!detected || noteIndex < 0) return@LaunchedEffect
-        val raw   = targetAngle
         val cur   = displayAngle % 360f
-        var delta = raw - cur
+        var delta = targetAngle - cur
         if (delta >  180f) delta -= 360f
         if (delta < -180f) delta += 360f
         displayAngle += delta
@@ -1467,9 +1631,9 @@ private fun TunerDial(
 
             paint.textSize  = labelSize
             paint.color = when {
-                isActive && abs(cents) < 5f  -> android.graphics.Color.parseColor("#2EE16B")
-                isActive && abs(cents) < 15f -> android.graphics.Color.parseColor("#FFD210")
-                isActive                     -> android.graphics.Color.parseColor("#FF4747")
+                isActive && abs(cents) < 5f  -> "#2EE16B".toColorInt()
+                isActive && abs(cents) < 15f -> "#FFD210".toColorInt()
+                isActive                     -> "#FF4747".toColorInt()
                 isNatural                    -> android.graphics.Color.argb(153, 255, 255, 255)
                 else                         -> android.graphics.Color.argb(97, 255, 255, 255)
             }
@@ -1556,9 +1720,9 @@ private fun TunerDial(
 // ------------------------------
 // TunerScreen
 // ------------------------------
+@SuppressLint("MissingPermission")
 @Composable
 fun TunerScreen() {
-    val frequency    by TunerManager.frequency.collectAsState()
     val noteName     by TunerManager.noteName.collectAsState()
     val cents        by TunerManager.cents.collectAsState()
     val detected     by TunerManager.detected.collectAsState()
@@ -1567,7 +1731,7 @@ fun TunerScreen() {
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted -> if (granted) TunerManager.start() }
+    ) @androidx.annotation.RequiresPermission(android.Manifest.permission.RECORD_AUDIO) { granted -> if (granted) TunerManager.start() }
 
     LaunchedEffect(Unit) { launcher.launch(Manifest.permission.RECORD_AUDIO) }
 
@@ -1894,32 +2058,32 @@ fun TanpuraKingsApp() {
         onDispose { AudioManager.release() }
     }
 
-    LaunchedEffect(masterVolume.value) {
-        AudioManager.updateMasterVolume(masterVolume.value)
+    LaunchedEffect(masterVolume.floatValue) {
+        AudioManager.updateMasterVolume(masterVolume.floatValue)
     }
 
-    LaunchedEffect(reverb.value, fineTune.value, echoMix.value, echoDelay.value, delayMix.value, delayTime.value) {
+    LaunchedEffect(reverb.floatValue, fineTune.floatValue, echoMix.floatValue, echoDelay.floatValue, delayMix.floatValue, delayTime.floatValue) {
         AudioManager.updateEffects(
-            reverb.value, fineTune.value,
-            echoMix.value, echoDelay.value,
-            delayMix.value, delayTime.value
+            reverb.floatValue, fineTune.floatValue,
+            echoMix.floatValue, echoDelay.floatValue,
+            delayMix.floatValue, delayTime.floatValue
         )
     }
 
-    LaunchedEffect(eqLow.value, eqMid.value, eqHigh.value) {
-        AudioManager.updateEQ(eqLow.value, eqMid.value, eqHigh.value)
+    LaunchedEffect(eqLow.floatValue, eqMid.floatValue, eqHigh.floatValue) {
+        AudioManager.updateEQ(eqLow.floatValue, eqMid.floatValue, eqHigh.floatValue)
     }
-    LaunchedEffect(stereoWidth.value) {
-        AudioManager.updateStereoWidth(stereoWidth.value)
+    LaunchedEffect(stereoWidth.floatValue) {
+        AudioManager.updateStereoWidth(stereoWidth.floatValue)
     }
     LaunchedEffect(metronomeOn.value) {
         if (metronomeOn.value) AudioManager.startMetronome() else AudioManager.stopMetronome()
     }
-    LaunchedEffect(metronomeBpm.value) {
-        AudioManager.setMetronomeBPM(metronomeBpm.value)
+    LaunchedEffect(metronomeBpm.floatValue) {
+        AudioManager.setMetronomeBPM(metronomeBpm.floatValue)
     }
-    LaunchedEffect(metronomeVolume.value) {
-        AudioManager.setMetronomeVolume(metronomeVolume.value)
+    LaunchedEffect(metronomeVolume.floatValue) {
+        AudioManager.setMetronomeVolume(metronomeVolume.floatValue)
     }
 
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -1974,6 +2138,57 @@ fun TanpuraKingsApp() {
 // ------------------------------
 // DroneScreen — the scrolling drone UI (extracted from TanpuraKingsApp)
 // ------------------------------
+// Formats seconds → "MM:SS" or "H:MM:SS" when past one hour.
+private fun formatElapsed(secs: Int): String {
+    val h = secs / 3600
+    val m = (secs % 3600) / 60
+    val s = secs % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s)
+    else "%02d:%02d".format(m, s)
+}
+
+/**
+ * Pill-shaped badge showing how long the drone has been playing.
+ * Green dot + "Playing" label when active; grey + "Stopped" when idle.
+ * Resets to 00:00 whenever all notes are stopped.
+ */
+@Composable
+private fun PlaybackTimerCard(elapsedSecs: Int, isPlaying: Boolean) {
+    val green = Color(0xFF1DB954)
+    Row(
+        modifier = Modifier
+            .background(Color.Black.copy(alpha = 0.42f), RoundedCornerShape(50.dp))
+            .padding(horizontal = 18.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // Indicator dot
+        Box(
+            modifier = Modifier
+                .size(9.dp)
+                .background(
+                    color = if (isPlaying) green else Color.White.copy(alpha = 0.25f),
+                    shape = CircleShape
+                )
+        )
+        // "Playing" / "Stopped" label
+        Text(
+            text       = if (isPlaying) "Playing" else "Stopped",
+            color      = if (isPlaying) Color.White else Color.White.copy(alpha = 0.35f),
+            fontSize   = 12.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        // Monospace clock
+        Text(
+            text       = formatElapsed(elapsedSecs),
+            color      = if (isPlaying) Color.White else Color.White.copy(alpha = 0.35f),
+            fontSize   = 20.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace
+        )
+    }
+}
+
 @Composable
 fun DroneScreen(
     activeNotes: MutableState<Set<String>>,
@@ -1993,6 +2208,26 @@ fun DroneScreen(
     metronomeBpm: MutableState<Float>,
     metronomeVolume: MutableState<Float>
 ) {
+    // ── Playback timer state ──────────────────────────────────────────────────
+    val isPlaying = activeNotes.value.isNotEmpty()
+    var elapsedSecs by remember { mutableIntStateOf(0) }
+
+    // Single LaunchedEffect keyed on isPlaying:
+    //   • When a note starts (isPlaying → true): record start time, tick every second.
+    //   • When all notes stop (isPlaying → false): cancel the loop, reset to 0.
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            val startMs = System.currentTimeMillis()
+            while (true) {
+                elapsedSecs = ((System.currentTimeMillis() - startMs) / 1000L).toInt()
+                delay(1000L)
+            }
+        } else {
+            elapsedSecs = 0
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -2012,7 +2247,9 @@ fun DroneScreen(
             modifier           = Modifier.width(96.dp).height(96.dp)
         )
         Text("Tanpura Kings", fontSize = 24.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
+        PlaybackTimerCard(elapsedSecs = elapsedSecs, isPlaying = isPlaying)
+        Spacer(modifier = Modifier.height(8.dp))
         AudioOutputButton()
         Spacer(modifier = Modifier.height(16.dp))
         PianoView(activeNotes, activeNoteVolumes, masterVolume.value)
