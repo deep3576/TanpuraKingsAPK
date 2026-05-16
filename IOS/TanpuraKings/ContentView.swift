@@ -34,6 +34,10 @@ struct ContentView: View {
     @State private var metronomeBPM: Float = 80
     @State private var metronomeVolume: Float = 0.7
 
+    // Persisted across restarts via UserDefaults (@AppStorage).
+    // −1 = Lower Octave, 0 = Mid Octave (default), +1 = Higher Octave.
+    @AppStorage("selectedOctave") private var selectedOctave: Int = 0
+
     var body: some View {
         TabView(selection: $selectedTab) {
             DroneView(
@@ -53,7 +57,8 @@ struct ContentView: View {
                 stereoWidth: $stereoWidth,
                 metronomeOn: $metronomeOn,
                 metronomeBPM: $metronomeBPM,
-                metronomeVolume: $metronomeVolume
+                metronomeVolume: $metronomeVolume,
+                selectedOctave: $selectedOctave
             )
             .tabItem {
                 Label("Drone", systemImage: "music.note")
@@ -68,6 +73,8 @@ struct ContentView: View {
         }
         .onAppear {
             AudioManager.shared.initializeIfNeeded()
+            // Restore persisted octave into the audio engine on every launch.
+            AudioManager.shared.updateOctave(selectedOctave)
         }
         .onChange(of: selectedTab) { _, newValue in
             switch newValue {
@@ -108,6 +115,7 @@ struct DroneView: View {
     @Binding var metronomeOn: Bool
     @Binding var metronomeBPM: Float
     @Binding var metronomeVolume: Float
+    @Binding var selectedOctave: Int
 
     @Environment(\.horizontalSizeClass) private var hSizeClass
 
@@ -122,7 +130,7 @@ struct DroneView: View {
     // time out on a single expression with 15+ chained .onChange modifiers.
 
     var body: some View {
-        // Second half: EQ, stereo width, metronome.
+        // Second half: EQ, stereo width, metronome, octave.
         effectsLayerView
             .onChange(of: eqLow)           { _, _   in pushEQ() }
             .onChange(of: eqMid)           { _, _   in pushEQ() }
@@ -134,6 +142,7 @@ struct DroneView: View {
             }
             .onChange(of: metronomeBPM)    { _, bpm in AudioManager.shared.setMetronomeBPM(bpm) }
             .onChange(of: metronomeVolume) { _, v   in AudioManager.shared.setMetronomeVolume(v) }
+            .onChange(of: selectedOctave)  { _, oct in AudioManager.shared.updateOctave(oct) }
     }
 
     // First half: layout + timer + core audio effects.
@@ -186,6 +195,7 @@ struct DroneView: View {
                 logoHeader(iconSize: 96, fontSize: 24)
                 PlaybackTimerView(startDate: playbackStart)
                 AudioOutputButton()
+                OctavePickerView(selectedOctave: $selectedOctave)
                 PianoView(
                     activeNotes: $activeNotes,
                     activeNoteVolumes: $activeNoteVolumes,
@@ -237,6 +247,7 @@ struct DroneView: View {
                     logoHeader(iconSize: 120, fontSize: 30)
                     PlaybackTimerView(startDate: playbackStart)
                     AudioOutputButton()
+                    OctavePickerView(selectedOctave: $selectedOctave)
                     PianoView(
                         activeNotes: $activeNotes,
                         activeNoteVolumes: $activeNoteVolumes,

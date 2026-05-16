@@ -19,6 +19,7 @@
 		B100000A00000000000000A1 /* MetronomePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100000A00000000000000A1 /* MetronomePanel.swift */; };
 		B100000B00000000000000A1 /* TunerManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100000B00000000000000A1 /* TunerManager.swift */; };
 		B100000C00000000000000A1 /* TunerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100000C00000000000000A1 /* TunerView.swift */; };
+		B100000E00000000000000A1 /* OctavePickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100000E00000000000000A1 /* OctavePickerView.swift */; };
 		B200000100000000000000A1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F200000100000000000000A1 /* Assets.xcassets */; };
 		B200000200000000000000A1 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F200000200000000000000A1 /* Preview Assets.xcassets */; };
 		B400000100000000000000A1 /* Audio in Resources */ = {isa = PBXBuildFile; fileRef = F400000100000000000000A1 /* Audio */; };
@@ -37,6 +38,7 @@
 		F100000A00000000000000A1 /* MetronomePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetronomePanel.swift; sourceTree = "<group>"; };
 		F100000B00000000000000A1 /* TunerManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunerManager.swift; sourceTree = "<group>"; };
 		F100000C00000000000000A1 /* TunerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunerView.swift; sourceTree = "<group>"; };
+		F100000E00000000000000A1 /* OctavePickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OctavePickerView.swift; sourceTree = "<group>"; };
 		F100000D00000000000000A1 /* CarPlaySceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarPlaySceneDelegate.swift; sourceTree = "<group>"; };
 		F100000F00000000000000A1 /* TanpuraKings.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TanpuraKings.entitlements; sourceTree = "<group>"; };
 		F200000100000000000000A1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -82,6 +84,7 @@
 				F100000A00000000000000A1 /* MetronomePanel.swift */,
 				F100000B00000000000000A1 /* TunerManager.swift */,
 				F100000C00000000000000A1 /* TunerView.swift */,
+				F100000E00000000000000A1 /* OctavePickerView.swift */,
 				F100000D00000000000000A1 /* CarPlaySceneDelegate.swift */,
 				F100000F00000000000000A1 /* TanpuraKings.entitlements */,
 				F200000100000000000000A1 /* Assets.xcassets */,
@@ -199,6 +202,7 @@
 				B100000A00000000000000A1 /* MetronomePanel.swift in Sources */,
 				B100000B00000000000000A1 /* TunerManager.swift in Sources */,
 				B100000C00000000000000A1 /* TunerView.swift in Sources */,
+				B100000E00000000000000A1 /* OctavePickerView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -350,6 +354,7 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kingsman.tanpurakings;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_CONST_VALUE_PROTOCOLS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -380,6 +385,7 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kingsman.tanpurakings;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_CONST_VALUE_PROTOCOLS = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
