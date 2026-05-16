@@ -20,6 +20,8 @@ import android.media.audiofx.Equalizer
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Switch
 import android.provider.Settings
 import android.util.Log
@@ -192,6 +194,16 @@ object AudioManager {
     // Stereo width: 0.0 = all notes panned center, 1.0 = full spread.
     private var stereoWidth: Float = 0.5f
 
+    // Octave selector: -1 = Lower, 0 = Mid (default), +1 = Higher.
+    // All notes are pitch-shifted from a single fsharp.mp3 base file.
+    // F# sits at the centre of the chromatic scale → max ±6 semitones shift.
+    private val semitoneOffsets: Map<String, Int> = mapOf(
+        "c" to -6, "csharp" to -5, "d" to -4, "dsharp" to -3,
+        "e" to -2, "f" to -1, "fsharp" to 0, "g" to 1,
+        "gsharp" to 2, "a" to 3, "asharp" to 4, "b" to 5
+    )
+    private var octaveLevel: Int = 0  // -1, 0, or +1
+
     // MediaSession — enables lock-screen / headphone / steering-wheel controls
     // and is the bridge to Android Auto in Phase 2.
     private var mediaSession: MediaSessionCompat? = null
@@ -274,20 +286,18 @@ object AudioManager {
         // Note files are NOT loaded into SoundPool — they were never played via
         // soundPool.play() and decompressing 12 large MP3s to PCM caused OOM.
         coroutineScope?.launch(Dispatchers.IO) {
-            val keys = listOf("c","csharp","d","dsharp","e","f","fsharp","g","gsharp","a","asharp","b")
+            // Only fsharp.mp3 is used as the base for all notes — fetch its duration.
             val retriever = MediaMetadataRetriever()
-            for (key in keys) {
-                try {
-                    val afd = context.applicationContext.assets.openFd("Audio/$key.mp3")
-                    retriever.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                        ?.toLongOrNull()
-                        ?.takeIf { it > 0 }
-                        ?.let { noteDurations[key] = it }
-                    afd.close()
-                } catch (e: Exception) {
-                    Log.e("AudioManager", "Duration read error: $key", e)
-                }
+            try {
+                val afd = context.applicationContext.assets.openFd("Audio/fsharp.mp3")
+                retriever.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    ?.toLongOrNull()
+                    ?.takeIf { it > 0 }
+                    ?.let { noteDurations["fsharp"] = it }
+                afd.close()
+            } catch (e: Exception) {
+                Log.e("AudioManager", "Duration read error: fsharp", e)
             }
             retriever.release()
             // Metronome click is a short transient — safe to keep in SoundPool.
@@ -430,6 +440,19 @@ object AudioManager {
     private fun fineTuneRate(cents: Float): Float =
         2.0.pow(cents / 1200.0).toFloat().coerceIn(0.5f, 2.0f)
 
+    /**
+     * Combined playback pitch rate for [noteName]:
+     *   semitone offset from F# base  ×  octave multiplier  ×  fine-tune rate.
+     * Mirrors the iOS formula: pitchCents = semitones*100 + octaveShift + fineTune.
+     */
+    private fun pitchRate(noteName: String): Float {
+        val key       = noteName.lowercase().replace("#", "sharp")
+        val semitones = semitoneOffsets[key] ?: 0
+        val semitoneRate = 2.0.pow(semitones / 12.0).toFloat()
+        val octaveRate   = 2.0.pow(octaveLevel.toDouble()).toFloat()  // 0.5 / 1.0 / 2.0
+        return semitoneRate * octaveRate * fineTuneRate(fineTuneCents)
+    }
+
     // ---------- 3-band EQ ----------
 
     private fun attachEqualizer(player: MediaPlayer, noteName: String) {
@@ -535,11 +558,13 @@ object AudioManager {
     fun setMetronomeVolume(volume: Float)  { metronomeVolume = volume.coerceIn(0f, 1f) }
 
     // Creates and prepares a MediaPlayer on the IO thread. Returns ready-to-start player.
-    private suspend fun buildPlayer(fileKey: String, volume: Float, pitch: Float): MediaPlayer? =
+    // Always loads fsharp.mp3 — the caller supplies the pre-computed pitch rate so each
+    // note sounds at the correct pitch via PlaybackParams.setPitch().
+    private suspend fun buildPlayer(volume: Float, pitch: Float): MediaPlayer? =
         withContext(Dispatchers.IO) {
             try {
                 val ctx = appContext ?: return@withContext null
-                val afd = ctx.assets.openFd("Audio/$fileKey.mp3")
+                val afd = ctx.assets.openFd("Audio/fsharp.mp3")
                 MediaPlayer().apply {
                     setAudioAttributes(
                         AudioAttributes.Builder()
@@ -557,7 +582,7 @@ object AudioManager {
                     }
                 }
             } catch (e: Exception) {
-                Log.e("AudioManager", "buildPlayer error: $fileKey", e)
+                Log.e("AudioManager", "buildPlayer error (fsharp base)", e)
                 null
             }
         }
@@ -565,15 +590,15 @@ object AudioManager {
     fun playNote(noteName: String, masterVolume: Float, noteVolume: Float = 1f) {
         if (activePlayers.size >= MAX_ACTIVE_NOTES) return
         currentMasterVolume = masterVolume
-        val fileKey = noteName.lowercase().replace("#", "sharp")
         val volume  = (masterVolume * noteVolume).coerceIn(0f, 1f)
 
         coroutineScope?.launch {
-            val pitch  = fineTuneRate(fineTuneCents)
+            // Combined pitch: semitone-from-F# × octave × fine-tune.
+            val pitch  = pitchRate(noteName)
             // Build the player at zero volume so we can fade in cleanly
             // (avoids a click/pop on tap-on, gives crossfade-feel when this
             // note is replacing another one the user just tapped off).
-            val player = buildPlayer(fileKey, 0f, pitch) ?: return@launch
+            val player = buildPlayer(0f, pitch) ?: return@launch
 
             player.start()
             activePlayers[noteName] = player
@@ -608,10 +633,10 @@ object AudioManager {
                 Log.w("AudioManager", "LoudnessEnhancer attach failed: $t")
             }
 
-            // Sub-octave companion player (pitch = 0.5 = one octave down)
+            // Sub-octave companion player: same pitch shifted one octave down.
             val subVol = (volume * subOctaveMix).coerceIn(0f, 1f)
             coroutineScope?.launch {
-                val sp = buildPlayer(fileKey, subVol, fineTuneRate(fineTuneCents) * 0.5f)
+                val sp = buildPlayer(subVol, pitchRate(noteName) * 0.5f)
                     ?: return@launch
                 sp.isLooping = true
                 sp.start()
@@ -631,9 +656,9 @@ object AudioManager {
                 reapplyStereoSpread()
             }
 
-            val duration = noteDurations[fileKey]
+            val duration = noteDurations["fsharp"]
             if (duration != null && duration > CROSSFADE_MS * 2) {
-                loopJobs[noteName] = launch { crossfadeLoop(fileKey, noteName, volume, duration) }
+                loopJobs[noteName] = launch { crossfadeLoop(noteName, volume, duration) }
             } else {
                 // Duration unknown yet or very short — fall back to built-in looping
                 player.isLooping = true
@@ -641,42 +666,55 @@ object AudioManager {
 
             // Persistent delay/echo via real looping MediaPlayer instances.
             // (Reverb is handled globally by EnvironmentalReverb, no per-note work needed.)
-            launchEffectPlayers(noteName, fileKey, volume, pitch)
+            launchEffectPlayers(noteName, volume, pitch)
         }
     }
 
     // Crossfade loop: starts the next player CROSSFADE_MS before the current one ends,
     // then smoothly hands volume over so there is never silence at the loop boundary.
     private suspend fun crossfadeLoop(
-        fileKey: String, noteName: String, volume: Float, durationMs: Long
+        noteName: String, volume: Float, durationMs: Long
     ) {
         // delay() throws CancellationException when the job is cancelled — no isActive needed
         val waitBeforeFade = (durationMs - CROSSFADE_MS).coerceAtLeast(200L)
         while (true) {
             delay(waitBeforeFade)
 
-            val pitch = fineTuneRate(fineTuneCents)
+            val pitch      = pitchRate(noteName)
+            val nextPlayer = buildPlayer(0f, pitch) ?: break
 
-            val nextPlayer = buildPlayer(fileKey, 0f, pitch) ?: break
+            // Bug fix: if stopNote() cancels this coroutine while nextPlayer is already
+            // started (during delay(stepMs) inside the fade loop), nextPlayer would keep
+            // playing with no owner in activePlayers — a permanent MediaPlayer leak.
+            // try/finally guarantees nextPlayer is stopped+released on any exit path
+            // (CancellationException, curPlayer disappearing, or normal completion).
+            // ownedByMap = true once activePlayers owns the player so finally is a no-op.
+            var ownedByMap = false
+            try {
+                val curPlayer = activePlayers[noteName]
+                if (curPlayer == null) break   // note stopped; finally releases nextPlayer
 
-            val curPlayer = activePlayers[noteName]
-            if (curPlayer == null) {
-                nextPlayer.release()
-                break
+                nextPlayer.start()
+                val stepMs = CROSSFADE_MS / CROSSFADE_STEPS
+                for (step in 1..CROSSFADE_STEPS) {
+                    val alpha = step.toFloat() / CROSSFADE_STEPS
+                    curPlayer.setVolume(volume * (1f - alpha), volume * (1f - alpha))
+                    nextPlayer.setVolume(volume * alpha, volume * alpha)
+                    delay(stepMs)   // CancellationException lands here if job is cancelled
+                }
+
+                activePlayers[noteName] = nextPlayer
+                ownedByMap = true           // map now owns nextPlayer — skip finally cleanup
+                runCatching { curPlayer.stop() }
+                curPlayer.release()
+            } finally {
+                if (!ownedByMap) {
+                    // Coroutine was cancelled or note disappeared mid-fade — stop the
+                    // orphaned next player before it leaks.
+                    runCatching { nextPlayer.stop() }
+                    nextPlayer.release()
+                }
             }
-
-            nextPlayer.start()
-            val stepMs = CROSSFADE_MS / CROSSFADE_STEPS
-            for (step in 1..CROSSFADE_STEPS) {
-                val alpha = step.toFloat() / CROSSFADE_STEPS
-                curPlayer.setVolume(volume * (1f - alpha), volume * (1f - alpha))
-                nextPlayer.setVolume(volume * alpha, volume * alpha)
-                delay(stepMs)
-            }
-
-            activePlayers[noteName] = nextPlayer
-            runCatching { curPlayer.stop() }
-            curPlayer.release()
         }
     }
 
@@ -771,8 +809,9 @@ object AudioManager {
     ) {
         if (fineTune != fineTuneCents) {
             fineTuneCents = fineTune
-            val pitch = fineTuneRate(fineTune)
-            activePlayers.values.forEach { player ->
+            // Each note has its own pitch (semitone + octave + fine-tune) — update individually.
+            activePlayers.forEach { (noteName, player) ->
+                val pitch = pitchRate(noteName)
                 runCatching { player.playbackParams = PlaybackParams().setSpeed(1.0f).setPitch(pitch) }
             }
         }
@@ -793,11 +832,10 @@ object AudioManager {
                 effectPlayers.remove(noteName)?.forEach { ep ->
                     runCatching { ep.stop() }; ep.release()
                 }
-                val fileKey = noteName.lowercase().replace("#", "sharp")
-                val nv   = noteVolumes[noteName] ?: 1f
-                val vol  = (currentMasterVolume * nv).coerceIn(0f, 1f)
-                val pitch = fineTuneRate(fineTuneCents)
-                scope.launchEffectPlayers(noteName, fileKey, vol, pitch)
+                val nv    = noteVolumes[noteName] ?: 1f
+                val vol   = (currentMasterVolume * nv).coerceIn(0f, 1f)
+                val pitch = pitchRate(noteName)
+                scope.launchEffectPlayers(noteName, vol, pitch)
             }
         }
     }
@@ -808,6 +846,30 @@ object AudioManager {
             val nv  = noteVolumes[noteName] ?: 1f
             val vol = (currentMasterVolume * nv * subOctaveMix).coerceIn(0f, 1f)
             runCatching { sp.setVolume(vol, vol) }
+        }
+    }
+
+    /**
+     * Switch to [octave]: -1 = Lower, 0 = Mid, +1 = Higher.
+     * Instantly re-pitches every currently-playing note (including sub-octave
+     * and echo copies) so the change is heard without restarting the notes.
+     * Mirrors iOS AudioManager.updateOctave(_:).
+     */
+    fun updateOctave(octave: Int) {
+        octaveLevel = octave.coerceIn(-1, 1)
+        activePlayers.forEach { (noteName, player) ->
+            val pitch = pitchRate(noteName)
+            runCatching { player.playbackParams = PlaybackParams().setSpeed(1.0f).setPitch(pitch) }
+        }
+        subOctavePlayers.forEach { (noteName, sp) ->
+            val pitch = pitchRate(noteName) * 0.5f
+            runCatching { sp.playbackParams = PlaybackParams().setSpeed(1.0f).setPitch(pitch) }
+        }
+        effectPlayers.forEach { (noteName, epList) ->
+            val pitch = pitchRate(noteName)
+            epList.forEach { ep ->
+                runCatching { ep.playbackParams = PlaybackParams().setSpeed(1.0f).setPitch(pitch) }
+            }
         }
     }
 
@@ -863,10 +925,10 @@ object AudioManager {
     // behind the main player — a true echo rather than a chorus of identical
     // copies starting from the top of the file.
     private fun CoroutineScope.launchEffectPlayers(
-        noteName: String, fileKey: String, volume: Float, pitch: Float
+        noteName: String, volume: Float, pitch: Float
     ) {
         if (echoMix <= 0f) return
-        val duration = noteDurations[fileKey] ?: 0L
+        val duration = noteDurations["fsharp"] ?: 0L
 
         echoJobs[noteName] = launch {
             // Echo: up to 6 decaying looping copies, each spaced echoDelayMs apart.
@@ -877,7 +939,7 @@ object AudioManager {
                 while (tapNum < 6 && tapVol >= 0.03f) {
                     delay(echoDelayMs.toLong())
                     if (!isActive) break
-                    val ep = buildPlayer(fileKey, tapVol, pitch) ?: break
+                    val ep = buildPlayer(tapVol, pitch) ?: break
                     // Seek to the phase-correct position so this copy sounds like
                     // a true echo of the main player echoDelayMs ago, not a chorus.
                     if (duration > 0) {
@@ -1616,6 +1678,74 @@ fun AudioOutputButton() {
 }
 
 // ------------------------------
+// OctavePickerCard — dropdown to choose Lower / Mid / Higher octave.
+// Mirrors iOS OctavePickerView with the same orange accent style.
+// ------------------------------
+@Composable
+fun OctavePickerCard(selectedOctave: MutableState<Int>) {
+    val accent  = Color(0xFFFFA500)
+    data class OctaveOption(val id: Int, val label: String)
+    val options = listOf(
+        OctaveOption(-1, "Lower Octave"),
+        OctaveOption( 0, "Mid Octave"),
+        OctaveOption( 1, "Higher Octave")
+    )
+    val currentLabel = options.first { it.id == selectedOctave.value }.label
+    var expanded by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xDD000000), shape = RoundedCornerShape(8.dp))
+            .padding(10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "Octave",
+            color      = Color.White,
+            fontSize   = 15.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.weight(1f))
+
+        Box {
+            Row(
+                modifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50.dp))
+                    .border(1.dp, accent.copy(alpha = 0.65f), RoundedCornerShape(50.dp))
+                    .clickable { expanded = true }
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(currentLabel, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text("⌃⌄", color = accent, fontSize = 11.sp)
+            }
+
+            DropdownMenu(
+                expanded          = expanded,
+                onDismissRequest  = { expanded = false }
+            ) {
+                options.forEach { opt ->
+                    DropdownMenuItem(
+                        text   = {
+                            Text(
+                                text  = if (selectedOctave.value == opt.id) "✓  ${opt.label}" else opt.label,
+                                color = if (selectedOctave.value == opt.id) accent else Color.Unspecified
+                            )
+                        },
+                        onClick = {
+                            selectedOctave.value = opt.id
+                            expanded = false
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------
 // MasterVolumeView
 // ------------------------------
 @Composable
@@ -2196,8 +2326,14 @@ fun TanpuraKingsApp() {
     val metronomeBpm    = remember { mutableFloatStateOf(80f) }
     val metronomeVolume = remember { mutableFloatStateOf(0.7f) }
 
+    // Octave selector (-1 = Lower, 0 = Mid, +1 = Higher), persisted via SharedPreferences.
+    val prefs = context.getSharedPreferences("TanpuraKingsPrefs", Context.MODE_PRIVATE)
+    val selectedOctave = remember { mutableIntStateOf(prefs.getInt("selectedOctave", 0)) }
+
     DisposableEffect(Unit) {
         AudioManager.init(context)
+        // Restore persisted octave into the audio engine on every launch.
+        AudioManager.updateOctave(selectedOctave.intValue)
         onDispose { AudioManager.release() }
     }
 
@@ -2235,6 +2371,10 @@ fun TanpuraKingsApp() {
     }
     LaunchedEffect(metronomeVolume.floatValue) {
         AudioManager.setMetronomeVolume(metronomeVolume.floatValue)
+    }
+    LaunchedEffect(selectedOctave.intValue) {
+        AudioManager.updateOctave(selectedOctave.intValue)
+        prefs.edit().putInt("selectedOctave", selectedOctave.intValue).apply()
     }
 
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -2279,7 +2419,8 @@ fun TanpuraKingsApp() {
                     reverb, fineTune, echoMix, echoDelay,
                     subOctaveMix, warmth, compressionAmount,
                     eqLow, eqMid, eqHigh, stereoWidth,
-                    metronomeOn, metronomeBpm, metronomeVolume
+                    metronomeOn, metronomeBpm, metronomeVolume,
+                    selectedOctave
                 )
                 1 -> TunerScreen()
             }
@@ -2359,7 +2500,8 @@ fun DroneScreen(
     stereoWidth: MutableState<Float>,
     metronomeOn: MutableState<Boolean>,
     metronomeBpm: MutableState<Float>,
-    metronomeVolume: MutableState<Float>
+    metronomeVolume: MutableState<Float>,
+    selectedOctave: MutableState<Int>
 ) {
     // ── Playback timer state ──────────────────────────────────────────────────
     val isPlaying = activeNotes.value.isNotEmpty()
@@ -2405,6 +2547,8 @@ fun DroneScreen(
         Spacer(modifier = Modifier.height(8.dp))
         AudioOutputButton()
         Spacer(modifier = Modifier.height(16.dp))
+        OctavePickerCard(selectedOctave)
+        Spacer(modifier = Modifier.height(8.dp))
         PianoView(activeNotes, activeNoteVolumes, masterVolume.value)
         Spacer(modifier = Modifier.height(16.dp))
         if (activeNoteVolumes.value.isNotEmpty()) {

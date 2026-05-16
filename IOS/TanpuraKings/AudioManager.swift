@@ -278,9 +278,13 @@ final class AudioManager: NSObject {
                 // halts all attached player nodes.  Bump the generation to
                 // kill any queued beat work items, then start a fresh chain.
                 if self.metronomeRunning {
-                    self.metronomeGeneration += 1
                     self.tickMetronome()
-                    self.scheduleNextBeat()
+                    // Bump gen + first scheduleNextBeat on metronomeTimerQueue
+                    // so it sees the latest metronomeBPM written by the slider.
+                    self.metronomeTimerQueue.async {
+                        self.metronomeGeneration += 1
+                        self.scheduleNextBeat()
+                    }
                 }
             } catch {
                 // Session still contested (common when a Bluetooth ownership
@@ -462,9 +466,14 @@ final class AudioManager: NSObject {
         // restart the chain (engine.stop() during a BT route change stops all
         // attached player nodes without firing any callback).
         if metronomeRunning && !metronomePlayer.isPlaying {
-            metronomeGeneration += 1
             tickMetronome()
-            scheduleNextBeat()
+            // Bump gen + restart on metronomeTimerQueue (same queue as the
+            // BPM writer) so the restarted chain reads the current BPM.
+            metronomeTimerQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.metronomeGeneration += 1
+                self.scheduleNextBeat()
+            }
         }
     }
 
@@ -849,14 +858,17 @@ final class AudioManager: NSObject {
     // MARK: - Metronome
 
     func setMetronomeBPM(_ bpm: Float) {
-        queue.async { [weak self] in
+        // BUG FIX: metronomeBPM is consumed by scheduleNextBeat() running on
+        // metronomeTimerQueue. If we wrote it on the audio `queue` (different
+        // queue), there is no memory barrier guaranteeing the timer queue ever
+        // sees the new value — the slider would silently have no effect on tempo.
+        // Writing on the SAME queue that reads it makes the change visible at
+        // the very next beat boundary, no timer restart required.
+        let clamped = max(40, min(240, bpm))
+        metronomeTimerQueue.async { [weak self] in
             guard let self = self else { return }
-            let clamped = max(40, min(240, bpm))
             guard clamped != self.metronomeBPM else { return }
             self.metronomeBPM = clamped
-            // No timer restart needed. The self-rescheduling chain reads
-            // metronomeBPM fresh on each link, so the new tempo is applied
-            // automatically at the very next beat boundary.
         }
     }
 
@@ -878,10 +890,17 @@ final class AudioManager: NSObject {
             }
             self.metronomeRunning = true
             self.metronomePlayer.volume = self.metronomeVolume
-            self.metronomeGeneration += 1
-            // Fire the first click immediately, then start the recurring chain.
+            // Fire the first click immediately on the audio queue.
             self.tickMetronome()
-            self.scheduleNextBeat()
+            // Hop to metronomeTimerQueue for everything else — the generation
+            // bump AND the first scheduleNextBeat() read of metronomeBPM must
+            // happen on the same queue where setMetronomeBPM() writes, otherwise
+            // the chain can start with a stale BPM if the slider was moved
+            // before the metronome was started.
+            self.metronomeTimerQueue.async {
+                self.metronomeGeneration += 1
+                self.scheduleNextBeat()
+            }
         }
     }
 
@@ -894,7 +913,12 @@ final class AudioManager: NSObject {
     /// `metronomeGeneration` changes (start/stop) the captured gen no longer
     /// matches and the link silently becomes a no-op, ending the old chain.
     private func scheduleNextBeat() {
-        guard metronomeRunning else { return }
+        // NOTE: do NOT read metronomeRunning here — this function is called both
+        // from `queue` (startMetronome) and from `metronomeTimerQueue` (recursive).
+        // Cross-queue reads of metronomeRunning are not guaranteed to be visible.
+        // The generation check inside the closure is the correct and sufficient guard:
+        // stopMetronome() bumps metronomeGeneration on `queue`, so any in-flight
+        // closure on metronomeTimerQueue that sees a stale gen simply returns.
         let gen = metronomeGeneration
         // Read BPM while already on the audio queue. The timer callback hops
         // back to this queue before touching metronome state, keeping tempo
@@ -916,11 +940,15 @@ final class AudioManager: NSObject {
     func stopMetronome() {
         queue.async { [weak self] in
             guard let self = self else { return }
-            // Bump generation first — any queued beat work item that fires
-            // after this will see a stale gen and become a silent no-op.
-            self.metronomeGeneration += 1
             self.metronomeRunning = false
             self.metronomePlayer.stop()
+        }
+        // Bump generation on metronomeTimerQueue (same queue where it's read)
+        // so the in-flight beat closure reliably sees the new gen and bails.
+        // Writing it on the audio `queue` could leave a stale value visible to
+        // the timer queue, which would allow one extra click to fire.
+        metronomeTimerQueue.async { [weak self] in
+            self?.metronomeGeneration += 1
         }
     }
 
