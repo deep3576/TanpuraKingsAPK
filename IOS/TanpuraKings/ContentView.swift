@@ -21,8 +21,9 @@ struct ContentView: View {
     @State private var fineTune: Float = 0
     @State private var echoMix: Float = 0
     @State private var echoDelay: Float = 300
-    @State private var delayMix: Float = 0
-    @State private var delayTime: Float = 500
+    @State private var subOctaveMix:      Float = 0
+    @State private var warmth:            Float = 0
+    @State private var compressionAmount: Float = 0
 
     @State private var eqLow: Float = 0
     @State private var eqMid: Float = 0
@@ -43,8 +44,9 @@ struct ContentView: View {
                 fineTune: $fineTune,
                 echoMix: $echoMix,
                 echoDelay: $echoDelay,
-                delayMix: $delayMix,
-                delayTime: $delayTime,
+                subOctaveMix: $subOctaveMix,
+                warmth: $warmth,
+                compressionAmount: $compressionAmount,
                 eqLow: $eqLow,
                 eqMid: $eqMid,
                 eqHigh: $eqHigh,
@@ -96,8 +98,9 @@ struct DroneView: View {
     @Binding var fineTune: Float
     @Binding var echoMix: Float
     @Binding var echoDelay: Float
-    @Binding var delayMix: Float
-    @Binding var delayTime: Float
+    @Binding var subOctaveMix:      Float
+    @Binding var warmth:            Float
+    @Binding var compressionAmount: Float
     @Binding var eqLow: Float
     @Binding var eqMid: Float
     @Binding var eqHigh: Float
@@ -137,8 +140,9 @@ struct DroneView: View {
         .onChange(of: fineTune)        { _, _   in pushEffects() }
         .onChange(of: echoMix)         { _, _   in pushEffects() }
         .onChange(of: echoDelay)       { _, _   in pushEffects() }
-        .onChange(of: delayMix)        { _, _   in pushEffects() }
-        .onChange(of: delayTime)       { _, _   in pushEffects() }
+        .onChange(of: subOctaveMix)      { _, v in AudioManager.shared.updateOctaveBlend(v) }
+        .onChange(of: warmth)            { _, v in AudioManager.shared.updateWarmth(v) }
+        .onChange(of: compressionAmount) { _, v in AudioManager.shared.updateCompressor(v) }
         .onChange(of: eqLow)           { _, _   in pushEQ() }
         .onChange(of: eqMid)           { _, _   in pushEQ() }
         .onChange(of: eqHigh)          { _, _   in pushEQ() }
@@ -194,8 +198,9 @@ struct DroneView: View {
                     fineTune: $fineTune,
                     echoMix: $echoMix,
                     echoDelay: $echoDelay,
-                    delayMix: $delayMix,
-                    delayTime: $delayTime,
+                    subOctaveMix: $subOctaveMix,
+                    warmth: $warmth,
+                    compressionAmount: $compressionAmount,
                     eqLow: $eqLow,
                     eqMid: $eqMid,
                     eqHigh: $eqHigh,
@@ -263,8 +268,9 @@ struct DroneView: View {
                         fineTune: $fineTune,
                         echoMix: $echoMix,
                         echoDelay: $echoDelay,
-                        delayMix: $delayMix,
-                        delayTime: $delayTime,
+                        subOctaveMix: $subOctaveMix,
+                        warmth: $warmth,
+                        compressionAmount: $compressionAmount,
                         eqLow: $eqLow,
                         eqMid: $eqMid,
                         eqHigh: $eqHigh,
@@ -306,9 +312,7 @@ struct DroneView: View {
             reverbMix: reverb,
             fineTune: fineTune,
             echoMix: echoMix,
-            echoDelay: echoDelay,
-            delayMix: delayMix,
-            delayTime: delayTime
+            echoDelay: echoDelay
         )
     }
 

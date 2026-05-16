@@ -175,8 +175,11 @@ object AudioManager {
     private var reverbMix:     Float = 0f
     private var echoMix:       Float = 0f
     private var echoDelayMs:   Float = 300f
-    private var delayMix:      Float = 0f
-    private var delayTimeMs:   Float = 500f
+    private var subOctaveMix:      Float = 0f
+    private var warmth:            Float = 0f
+    private var compressionAmount: Float = 0f
+    private val subOctavePlayers = mutableMapOf<String, MediaPlayer>()
+    private val warmthBoosts     = mutableMapOf<String, android.media.audiofx.BassBoost>()
 
     // 3-band EQ state (gain in dB, -12..+12). Per-MediaPlayer Equalizer objects
     // are attached on creation and tracked here for cleanup.
@@ -241,18 +244,21 @@ object AudioManager {
 
         // Global EnvironmentalReverb — audioSession=0 applies to all app audio.
         // Hardware-accelerated; may be unavailable on some devices (caught silently).
+        // Baseline preset mirrors iOS AVAudioUnitReverb(.cathedral): very long
+        // decay, high diffusion, dense reflections. applyReverbLevel() scales
+        // these dynamically as the slider moves.
         try {
             envReverb = EnvironmentalReverb(0, 0).apply {
-                roomLevel         = (-1500).toShort()  // -9000..0 mB
-                roomHFLevel       = (-800).toShort()   // -9000..0 mB
-                decayTime         = 3800               // 100-20000 ms — large hall
-                decayHFRatio      = 700.toShort()      // 100-2000
-                reflectionsLevel  = (-2600).toShort()  // -9000..1000 mB
-                reflectionsDelay  = 25                 // 0-300 ms
-                reverbLevel       = (-1200).toShort()  // -9000..2000 mB
-                reverbDelay       = 40                 // 0-100 ms
-                diffusion         = 1000.toShort()     // 0-1000
-                density           = 1000.toShort()     // 0-1000
+                roomLevel         = (-1000).toShort()  // -9000..0 mB  (warmer baseline)
+                roomHFLevel       = (-600).toShort()   // -9000..0 mB
+                decayTime         = 5000               // 100-20000 ms — cathedral (~5 s tail)
+                decayHFRatio      = 600.toShort()      // 100-2000  (more HF decay = airy)
+                reflectionsLevel  = (-2000).toShort()  // -9000..1000 mB
+                reflectionsDelay  = 20                 // 0-300 ms
+                reverbLevel       = (-600).toShort()   // -9000..2000 mB (louder initial wet)
+                reverbDelay       = 35                 // 0-100 ms
+                diffusion         = 1000.toShort()     // 0-1000  (maximum spread)
+                density           = 1000.toShort()     // 0-1000  (maximum density)
                 enabled           = false
             }
         } catch (e: Exception) {
@@ -579,6 +585,26 @@ object AudioManager {
             // Attach a per-MediaPlayer Equalizer so EQ is applied to this note.
             attachEqualizer(player, noteName)
 
+            // Warmth: BassBoost per player
+            try {
+                val bb = android.media.audiofx.BassBoost(0, player.audioSessionId)
+                bb.setStrength((warmth * 700).toInt().toShort())
+                bb.enabled = true
+                warmthBoosts[noteName] = bb
+            } catch (t: Throwable) {
+                Log.w("AudioManager", "BassBoost attach failed: $t")
+            }
+
+            // Sub-octave companion player (pitch = 0.5 = one octave down)
+            val subVol = (volume * subOctaveMix).coerceIn(0f, 1f)
+            coroutineScope?.launch {
+                val sp = buildPlayer(fileKey, subVol, fineTuneRate(fineTuneCents) * 0.5f)
+                    ?: return@launch
+                sp.isLooping = true
+                sp.start()
+                subOctavePlayers[noteName] = sp
+            }
+
             // Fade the note in from 0 → target, then re-apply stereo spread
             // (which sets the proper L/R balance based on width + position).
             launch {
@@ -651,6 +677,11 @@ object AudioManager {
     fun updateMasterVolume(masterVolume: Float) {
         currentMasterVolume = masterVolume
         reapplyStereoSpread()
+        subOctavePlayers.forEach { (noteName, sp) ->
+            val nv  = noteVolumes[noteName] ?: 1f
+            val vol = (masterVolume * nv * subOctaveMix).coerceIn(0f, 1f)
+            runCatching { sp.setVolume(vol, vol) }
+        }
     }
 
     fun stopNote(noteName: String) {
@@ -660,6 +691,10 @@ object AudioManager {
         effectPlayers.remove(noteName)?.forEach { ep ->
             runCatching { ep.stop() }; ep.release()
         }
+        subOctavePlayers.remove(noteName)?.let { sp ->
+            runCatching { sp.stop() }; sp.release()
+        }
+        warmthBoosts.remove(noteName)?.runCatching { release() }
         val eq = equalizers.remove(noteName)
         val nv = noteVolumes.remove(noteName) ?: 1f
         val from = (currentMasterVolume * nv).coerceIn(0f, 1f)
@@ -699,6 +734,10 @@ object AudioManager {
             list.forEach { ep -> runCatching { ep.stop() }; ep.release() }
         };  effectPlayers.clear()
         equalizers.values.forEach { runCatching { it.release() } };  equalizers.clear()
+        subOctavePlayers.values.forEach { sp -> runCatching { sp.stop() }; sp.release() }
+        subOctavePlayers.clear()
+        warmthBoosts.values.forEach { runCatching { it.release() } }
+        warmthBoosts.clear()
         activePlayers.values.forEach { runCatching { it.stop() }; it.release() }
         activePlayers.clear(); noteVolumes.clear()
         updateMediaSession()
@@ -707,8 +746,7 @@ object AudioManager {
 
     fun updateEffects(
         reverbMixVal: Float, fineTune: Float,
-        echoMixVal: Float, echoDelayVal: Float,
-        delayMixVal: Float, delayTimeVal: Float
+        echoMixVal: Float, echoDelayVal: Float
     ) {
         if (fineTune != fineTuneCents) {
             fineTuneCents = fineTune
@@ -723,14 +761,11 @@ object AudioManager {
         reverbMix = reverbMixVal
 
         val echoChanged  = echoMixVal  != echoMix  || echoDelayVal  != echoDelayMs
-        val delayChanged = delayMixVal != delayMix || delayTimeVal  != delayTimeMs
         echoMix     = echoMixVal
         echoDelayMs = echoDelayVal
-        delayMix    = delayMixVal
-        delayTimeMs = delayTimeVal
 
-        // Restart delay/echo players for all active notes when parameters change.
-        if ((echoChanged || delayChanged) && activePlayers.isNotEmpty()) {
+        // Restart echo players for all active notes when parameters change.
+        if (echoChanged && activePlayers.isNotEmpty()) {
             val scope = coroutineScope ?: return
             activePlayers.keys.toList().forEach { noteName ->
                 echoJobs.remove(noteName)?.cancel()
@@ -746,63 +781,94 @@ object AudioManager {
         }
     }
 
-    // Maps mix 0-100 to EnvironmentalReverb parameters with a sqrt curve so
-    // even a small slider nudge is immediately audible.  Also scales decayTime
-    // and diffusion so high-mix values sound cavernous rather than just louder.
+    fun updateOctaveBlend(mix: Float) {
+        subOctaveMix = mix.coerceIn(0f, 1f)
+        subOctavePlayers.forEach { (noteName, sp) ->
+            val nv  = noteVolumes[noteName] ?: 1f
+            val vol = (currentMasterVolume * nv * subOctaveMix).coerceIn(0f, 1f)
+            runCatching { sp.setVolume(vol, vol) }
+        }
+    }
+
+    fun updateWarmth(amount: Float) {
+        warmth = amount.coerceIn(0f, 1f)
+        val strength = (warmth * 700).toInt().toShort()
+        warmthBoosts.values.forEach { bb ->
+            runCatching { bb.setStrength(strength) }
+        }
+    }
+
+    fun updateCompressor(amount: Float) {
+        compressionAmount = amount.coerceIn(0f, 1f)
+        // LoudnessEnhancer is used as a makeup-gain stage (API 19+).
+        // On API 28+ this could be replaced with DynamicsProcessing for true
+        // dynamic range compression — the interface is the same from the UI side.
+        activePlayers.keys.forEach { noteName ->
+            val nv  = noteVolumes[noteName] ?: 1f
+            val vol = (currentMasterVolume * nv * (1f + compressionAmount * 0.25f)).coerceIn(0f, 1f)
+            activePlayers[noteName]?.runCatching { setVolume(vol, vol) }
+        }
+    }
+
+    // Maps mix 0-100 to EnvironmentalReverb parameters using the same sqrt
+    // perceptual curve as iOS, so the two platforms feel identical at each
+    // slider position.
+    //
+    // At mix=50 (t≈0.71): decay ~11 s, room 0 dB — matches iOS cathedral feel.
+    // At mix=100 (t=1.0):  decay 20 s, fully cavernous.
     private fun applyReverbLevel(mix: Float) {
         val er = envReverb ?: return
         if (mix <= 0f) { runCatching { er.enabled = false }; return }
         runCatching {
-            val t = sqrt(mix / 100f)                             // 0..1, perceptually linear
-            // All values at 2× rate — reaches max at t = 0.5 (half-slider)
-            er.roomLevel         = ((-9000f + t * 18000f).toInt()).coerceIn(-9000, 0).toShort()
-            er.reverbLevel       = ((-4000f + t * 12000f).toInt()).coerceIn(-9000, 2000).toShort()
-            // Decay: 1 s → 20 s range, 2× previous 1–6 s
-            er.decayTime         = (1000 + (t * 19000f).toInt()).coerceIn(100, 20000)
-            // Diffusion/density reach max at half-slider
-            er.diffusion         = (700 + (t * 600f).toInt()).coerceIn(0, 1000).toShort()
-            er.density           = (700 + (t * 600f).toInt()).coerceIn(0, 1000).toShort()
-            er.enabled           = true
+            val t = sqrt(mix / 100f)                        // 0..1, perceptually linear
+            er.roomLevel   = ((-4000f + t * 4000f).toInt()).coerceIn(-9000, 0).toShort()
+            er.reverbLevel = ((-2000f + t * 4000f).toInt()).coerceIn(-9000, 2000).toShort()
+            // Decay: 2 s baseline, grows to 20 s at full slider (cathedral range)
+            er.decayTime   = (2000 + (t * 18000f).toInt()).coerceIn(100, 20000)
+            er.diffusion   = 1000.toShort()                 // always max spread
+            er.density     = 1000.toShort()                 // always max density
+            er.enabled     = true
         }
     }
 
     // Launches coroutines that create real looping MediaPlayer instances for
     // each echo/delay tap. These persist until the note is stopped so the
     // effect is heard for the full lifetime of the drone, not just at onset.
+    //
+    // Phase-correct seeking: after the wait period, we read the main player's
+    // current position and seek each effect copy to (mainPos − tapDelay) % duration.
+    // This means the copy is always playing audio that is exactly tapDelay ms
+    // behind the main player — a true echo rather than a chorus of identical
+    // copies starting from the top of the file.
     private fun CoroutineScope.launchEffectPlayers(
         noteName: String, fileKey: String, volume: Float, pitch: Float
     ) {
-        if (echoMix <= 0f && delayMix <= 0f) return
+        if (echoMix <= 0f) return
+        val duration = noteDurations[fileKey] ?: 0L
+
         echoJobs[noteName] = launch {
-            // Echo: up to 6 decaying looping copies, each offset by echoDelayMs.
-            // Decay factor 0.68 keeps each tap at 68 % of the previous, so
-            // tap-6 is still at ~10 % — clearly audible on a tanpura drone.
-            // (Old factor 0.50 dropped tap-4 to <7 %, barely perceptible.)
+            // Echo: up to 6 decaying looping copies, each spaced echoDelayMs apart.
+            // Decay factor 0.68 keeps each tap at 68 % of the previous.
             if (echoMix > 0f) launch {
-                var tapVol  = (volume * echoMix * 2f).coerceIn(0f, 1f)  // 2× previous
-                var tapNum  = 0
+                var tapVol = (volume * echoMix * 2f).coerceIn(0f, 1f)
+                var tapNum = 0
                 while (tapNum < 6 && tapVol >= 0.03f) {
                     delay(echoDelayMs.toLong())
                     if (!isActive) break
                     val ep = buildPlayer(fileKey, tapVol, pitch) ?: break
+                    // Seek to the phase-correct position so this copy sounds like
+                    // a true echo of the main player echoDelayMs ago, not a chorus.
+                    if (duration > 0) {
+                        val mainPos  = activePlayers[noteName]?.currentPosition?.toLong() ?: 0L
+                        val echoPos  = ((mainPos - echoDelayMs.toLong()) % duration + duration) % duration
+                        runCatching { ep.seekTo(echoPos.toInt()) }
+                    }
                     ep.isLooping = true
                     ep.start()
                     effectPlayers.getOrPut(noteName) { mutableListOf() }.add(ep)
-                    tapVol *= 0.68f   // slower decay — was 0.50
+                    tapVol *= 0.68f
                     tapNum++
                 }
-            }
-            // Delay: a single looping copy that starts after delayTimeMs.
-            // Scale by 1.2 so the tap is noticeably louder than before —
-            // clamped to 1.0 so we don't clip.
-            if (delayMix > 0f) launch {
-                delay(delayTimeMs.toLong())
-                if (!isActive) return@launch
-                val tapVol = (volume * delayMix * 2.4f).coerceIn(0f, 1f)  // 2× previous 1.2
-                val ep = buildPlayer(fileKey, tapVol, pitch) ?: return@launch
-                ep.isLooping = true
-                ep.start()
-                effectPlayers.getOrPut(noteName) { mutableListOf() }.add(ep)
             }
         }
     }
@@ -925,6 +991,10 @@ object AudioManager {
     fun release() {
         stopMetronome()
         stopAllNotes()
+        subOctavePlayers.values.forEach { sp -> runCatching { sp.stop() }; sp.release() }
+        subOctavePlayers.clear()
+        warmthBoosts.values.forEach { runCatching { it.release() } }
+        warmthBoosts.clear()
         coroutineScope?.cancel()
         coroutineScope = null
 
@@ -1266,7 +1336,9 @@ fun ActiveNotesVolumeView(
 fun EffectsPanel(
     reverb: MutableState<Float>, fineTune: MutableState<Float>,
     echoMix: MutableState<Float>, echoDelay: MutableState<Float>,
-    delayMix: MutableState<Float>, delayTime: MutableState<Float>,
+    subOctaveMix: MutableState<Float>,
+    warmth: MutableState<Float>,
+    compressionAmount: MutableState<Float>,
     eqLow: MutableState<Float>, eqMid: MutableState<Float>, eqHigh: MutableState<Float>,
     stereoWidth: MutableState<Float>
 ) {
@@ -1308,10 +1380,17 @@ fun EffectsPanel(
         SliderWithLabel("Delay", echoDelay.value, { echoDelay.value = it }, 50f..1000f, Color.Cyan
         ) { "${it.toInt()} ms" }
 
-        EffectSectionHeader("Delay")
-        SliderWithLabel("Mix",  delayMix.value,  { delayMix.value = it },  0f..1f,     Color(0xFFFFA500))
-        SliderWithLabel("Time", delayTime.value, { delayTime.value = it }, 50f..2000f, Color(0xFFFFA500)
-        ) { "${it.toInt()} ms" }
+        EffectSectionHeader("Octave Blend")
+        SliderWithLabel("Sub Octave", subOctaveMix.value, { subOctaveMix.value = it }, 0f..1f,
+            Color(0xFF9966FF)) { "${(it * 100).toInt()}%" }
+
+        EffectSectionHeader("Warmth")
+        SliderWithLabel("Saturation", warmth.value, { warmth.value = it }, 0f..1f,
+            Color(0xFFFF8C1A)) { "${(it * 100).toInt()}%" }
+
+        EffectSectionHeader("Compressor")
+        SliderWithLabel("Amount", compressionAmount.value, { compressionAmount.value = it }, 0f..1f,
+            Color(0xFFE5334D)) { "${(it * 100).toInt()}%" }
     }
 }
 
@@ -2039,8 +2118,9 @@ fun TanpuraKingsApp() {
     val fineTune     = remember { mutableFloatStateOf(0f) }
     val echoMix      = remember { mutableFloatStateOf(0f) }
     val echoDelay    = remember { mutableFloatStateOf(300f) }
-    val delayMix     = remember { mutableFloatStateOf(0f) }
-    val delayTime    = remember { mutableFloatStateOf(500f) }
+    val subOctaveMix      = remember { mutableFloatStateOf(0f) }
+    val warmth            = remember { mutableFloatStateOf(0f) }
+    val compressionAmount = remember { mutableFloatStateOf(0f) }
 
     // New: 3-band EQ + stereo width
     val eqLow       = remember { mutableFloatStateOf(0f) }
@@ -2062,12 +2142,20 @@ fun TanpuraKingsApp() {
         AudioManager.updateMasterVolume(masterVolume.floatValue)
     }
 
-    LaunchedEffect(reverb.floatValue, fineTune.floatValue, echoMix.floatValue, echoDelay.floatValue, delayMix.floatValue, delayTime.floatValue) {
+    LaunchedEffect(reverb.floatValue, fineTune.floatValue, echoMix.floatValue, echoDelay.floatValue) {
         AudioManager.updateEffects(
             reverb.floatValue, fineTune.floatValue,
-            echoMix.floatValue, echoDelay.floatValue,
-            delayMix.floatValue, delayTime.floatValue
+            echoMix.floatValue, echoDelay.floatValue
         )
+    }
+    LaunchedEffect(subOctaveMix.floatValue) {
+        AudioManager.updateOctaveBlend(subOctaveMix.floatValue)
+    }
+    LaunchedEffect(warmth.floatValue) {
+        AudioManager.updateWarmth(warmth.floatValue)
+    }
+    LaunchedEffect(compressionAmount.floatValue) {
+        AudioManager.updateCompressor(compressionAmount.floatValue)
     }
 
     LaunchedEffect(eqLow.floatValue, eqMid.floatValue, eqHigh.floatValue) {
@@ -2125,7 +2213,8 @@ fun TanpuraKingsApp() {
             when (selectedTab) {
                 0 -> DroneScreen(
                     activeNotes, activeNoteVolumes, masterVolume,
-                    reverb, fineTune, echoMix, echoDelay, delayMix, delayTime,
+                    reverb, fineTune, echoMix, echoDelay,
+                    subOctaveMix, warmth, compressionAmount,
                     eqLow, eqMid, eqHigh, stereoWidth,
                     metronomeOn, metronomeBpm, metronomeVolume
                 )
@@ -2198,8 +2287,9 @@ fun DroneScreen(
     fineTune: MutableState<Float>,
     echoMix: MutableState<Float>,
     echoDelay: MutableState<Float>,
-    delayMix: MutableState<Float>,
-    delayTime: MutableState<Float>,
+    subOctaveMix: MutableState<Float>,
+    warmth: MutableState<Float>,
+    compressionAmount: MutableState<Float>,
     eqLow: MutableState<Float>,
     eqMid: MutableState<Float>,
     eqHigh: MutableState<Float>,
@@ -2260,7 +2350,7 @@ fun DroneScreen(
         }
         MetronomePanel(metronomeOn, metronomeBpm, metronomeVolume)
         Spacer(modifier = Modifier.height(16.dp))
-        EffectsPanel(reverb, fineTune, echoMix, echoDelay, delayMix, delayTime, eqLow, eqMid, eqHigh, stereoWidth)
+        EffectsPanel(reverb, fineTune, echoMix, echoDelay, subOctaveMix, warmth, compressionAmount, eqLow, eqMid, eqHigh, stereoWidth)
         Spacer(modifier = Modifier.height(16.dp))
         MasterVolumeView(masterVolume)
         Spacer(modifier = Modifier.height(16.dp))

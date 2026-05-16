@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AudioToolbox
 import MediaPlayer
 
 final class AudioManager: NSObject {
@@ -9,8 +10,17 @@ final class AudioManager: NSObject {
     private let effectsBus = AVAudioMixerNode()
     private let eqUnit = AVAudioUnitEQ(numberOfBands: 3)
     private let reverbUnit = AVAudioUnitReverb()
-    private let delayUnit = AVAudioUnitDelay()
     private let echoUnit = AVAudioUnitDelay()
+    private let warmthUnit     = AVAudioUnitDistortion()
+    private let compressorUnit: AVAudioUnitEffect = {
+        var desc = AudioComponentDescription()
+        desc.componentType         = kAudioUnitType_Effect
+        desc.componentSubType      = kAudioUnitSubType_DynamicsProcessor
+        desc.componentManufacturer = kAudioUnitManufacturer_Apple
+        desc.componentFlags        = 0
+        desc.componentFlagsMask    = 0
+        return AVAudioUnitEffect(audioComponentDescription: desc)
+    }()
 
     // Metronome runs on its own player on a separate branch into the main
     // mixer, so it bypasses the reverb/delay/echo chain.
@@ -19,6 +29,9 @@ final class AudioManager: NSObject {
     // Each beat schedules the next via a DispatchWorkItem so the current BPM
     // is always read fresh — no timer restart needed when the slider changes.
     private var metronomeWorkItem: DispatchWorkItem?
+    // Debounce work item: reschedules the beat chain from .now() after the
+    // slider has been idle for 150 ms, giving immediate tempo response.
+    private var pendingBPMWorkItem: DispatchWorkItem?
     private var metronomeRunning = false
     private var metronomeBPM: Float = 80
     private var metronomeVolume: Float = 0.7
@@ -53,6 +66,8 @@ final class AudioManager: NSObject {
         // Bumped on each new fade so a stale fade ramp from a previous
         // play/stop bails out on the next step.
         var fadeGeneration: Int = 0
+        var subPlayer: AVAudioPlayerNode? = nil
+        var subPitch:  AVAudioUnitTimePitch? = nil
 
         init(player: AVAudioPlayerNode, pitch: AVAudioUnitTimePitch, buffer: AVAudioPCMBuffer, volume: Float) {
             self.player = player
@@ -74,8 +89,9 @@ final class AudioManager: NSObject {
     private var reverbMix: Float = 0
     private var echoMix: Float = 0
     private var echoDelayMs: Float = 300
-    private var delayMix: Float = 0
-    private var delayTimeMs: Float = 500
+    private var subOctaveMix:      Float = 0   // 0 = off, 1 = full sub-octave blend
+    private var warmth:            Float = 0   // 0 = dry, 1 = fully warm
+    private var compressionAmount: Float = 0   // 0 = bypass, 1 = full compression
 
     // 0.0 = mono center, 1.0 = full stereo. With multiple active notes we
     // pan them evenly across [-stereoWidth, +stereoWidth] for a wider drone.
@@ -210,22 +226,34 @@ final class AudioManager: NSObject {
             do {
                 try AVAudioSession.sharedInstance().setActive(true)
 
-                // After a route/config change every AVAudioPlayerNode has lost
-                // its scheduled buffer. Stop each player, restart the engine,
-                // then re-schedule + re-play. With scheduleBuffer(.loops) there
-                // are no completion handlers to invalidate, so no generation bump.
+                // Stop all active note players before restarting the engine.
                 for (_, note) in self.activeNotes where !note.isStopping {
                     note.player.stop()
                 }
 
-                if !self.engine.isRunning {
-                    self.engine.prepare()
-                    try self.engine.start()
-                }
+                // Always do a full engine stop+start on every route change.
+                // Even when engine.isRunning, a BT route swap causes it to
+                // silently output to the disconnected device until the engine
+                // is explicitly reset. Stopping first is safe — all nodes
+                // remain attached and reconnect automatically on start().
+                if self.engine.isRunning { self.engine.stop() }
+                self.engine.prepare()
+                try self.engine.start()
 
+                // Re-schedule and restart each drone note.
                 for (_, note) in self.activeNotes where !note.isStopping {
                     self.scheduleLoopingBuffer(for: note)
                     note.player.play()
+                    note.subPlayer?.play()
+                }
+
+                // Also restart the metronome if it was running — its player
+                // is stopped by engine.stop() and must be explicitly resumed.
+                if self.metronomeRunning {
+                    if !self.metronomePlayer.isPlaying { self.metronomePlayer.play() }
+                    // Bump generation + reschedule so the old chain is replaced.
+                    self.metronomeGeneration += 1
+                    self.scheduleNextBeat()
                 }
             } catch {
                 // Session still contested (common when a Bluetooth ownership
@@ -258,13 +286,25 @@ final class AudioManager: NSObject {
         reverbUnit.loadFactoryPreset(.cathedral)
         reverbUnit.wetDryMix = 0
 
-        delayUnit.delayTime = TimeInterval(delayTimeMs / 1000.0)
-        delayUnit.feedback = 90   // 2× previous 75 (capped near 100)
-        delayUnit.wetDryMix = 0
-
         echoUnit.delayTime = TimeInterval(echoDelayMs / 1000.0)
         echoUnit.feedback = 97   // 2× previous 85 (capped near 100)
         echoUnit.wetDryMix = 0
+
+        warmthUnit.loadFactoryPreset(.softDistortionFullWave)
+        warmthUnit.preGain    = -8   // prevent clipping before saturation
+        warmthUnit.wetDryMix  = 0    // start dry; updated by updateWarmth()
+
+        // Compressor: bypass at startup (threshold = 0 dB = no compression)
+        AudioUnitSetParameter(compressorUnit.audioUnit, 0,
+                              kAudioUnitScope_Global, 0, 0, 0)   // threshold 0 dB
+        AudioUnitSetParameter(compressorUnit.audioUnit, 1,
+                              kAudioUnitScope_Global, 0, 5, 0)   // headroom 5 dB
+        AudioUnitSetParameter(compressorUnit.audioUnit, 4,
+                              kAudioUnitScope_Global, 0, 0.01, 0) // attack 10 ms
+        AudioUnitSetParameter(compressorUnit.audioUnit, 5,
+                              kAudioUnitScope_Global, 0, 0.15, 0) // release 150 ms
+        AudioUnitSetParameter(compressorUnit.audioUnit, 6,
+                              kAudioUnitScope_Global, 0, 0, 0)   // master gain 0 dB
 
         // 3-band EQ: low shelf @ 100 Hz, mid parametric @ 1 kHz, high shelf @ 8 kHz.
         // Default gain = 0 dB (flat). User adjusts per band via the UI.
@@ -285,18 +325,20 @@ final class AudioManager: NSObject {
         engine.attach(effectsBus)
         engine.attach(eqUnit)
         engine.attach(reverbUnit)
-        engine.attach(delayUnit)
         engine.attach(echoUnit)
         engine.attach(metronomePlayer)
+        engine.attach(warmthUnit)
+        engine.attach(compressorUnit)
 
         let mainMixer = engine.mainMixerNode
 
-        // Drone path: per-note players → effectsBus → EQ → reverb → delay → echo → main
-        engine.connect(effectsBus, to: eqUnit, format: processingFormat)
-        engine.connect(eqUnit, to: reverbUnit, format: processingFormat)
-        engine.connect(reverbUnit, to: delayUnit, format: processingFormat)
-        engine.connect(delayUnit, to: echoUnit, format: processingFormat)
-        engine.connect(echoUnit, to: mainMixer, format: processingFormat)
+        // Drone path: effectsBus → EQ → Warmth → Compressor → Reverb → Echo → main
+        engine.connect(effectsBus,     to: eqUnit,         format: processingFormat)
+        engine.connect(eqUnit,         to: warmthUnit,     format: processingFormat)
+        engine.connect(warmthUnit,     to: compressorUnit, format: processingFormat)
+        engine.connect(compressorUnit, to: reverbUnit,     format: processingFormat)
+        engine.connect(reverbUnit,     to: echoUnit,       format: processingFormat)
+        engine.connect(echoUnit,       to: mainMixer,      format: processingFormat)
         // Metronome bypasses the effects so the click stays dry.
         engine.connect(metronomePlayer, to: mainMixer, format: processingFormat)
 
@@ -342,7 +384,9 @@ final class AudioManager: NSObject {
     //    never called (seen on some car head units).
     private func watchdogTick() {
         guard isInitialized else { return }
-        guard !activeNotes.isEmpty else { return }
+        // Run whenever there are active notes OR the metronome is on —
+        // both need to be kept alive across BT route changes.
+        guard !activeNotes.isEmpty || metronomeRunning else { return }
 
         if isInterrupted {
             // Try to reclaim the session. If the remote device still holds
@@ -368,14 +412,24 @@ final class AudioManager: NSObject {
             }
         }
 
+        // Restart any drone note that silently stopped.
         for (_, note) in activeNotes where !note.isStopping {
             if !note.player.isPlaying {
-                // Re-schedule the looping buffer and restart the player.
-                // No generation bump needed — scheduleBuffer(.loops) has no
-                // completion handler to invalidate.
                 scheduleLoopingBuffer(for: note)
                 note.player.play()
             }
+            if let sp = note.subPlayer, !sp.isPlaying {
+                note.subPlayer?.scheduleBuffer(note.buffer, at: nil, options: .loops, completionHandler: nil)
+                sp.play()
+            }
+        }
+
+        // Restart the metronome beat chain if it was silenced by an engine
+        // restart (engine.stop() halts all attached player nodes).
+        if metronomeRunning && !metronomePlayer.isPlaying {
+            metronomePlayer.play()
+            metronomeGeneration += 1
+            scheduleNextBeat()
         }
     }
 
@@ -413,6 +467,8 @@ final class AudioManager: NSObject {
         note.player.scheduleBuffer(note.buffer, at: nil,
                                    options: .loops,
                                    completionHandler: nil)
+        note.subPlayer?.scheduleBuffer(note.buffer, at: nil,
+                                       options: .loops, completionHandler: nil)
     }
 
     func playNote(_ noteName: String, masterVolume: Float, noteVolume: Float = 1.0) {
@@ -463,6 +519,21 @@ final class AudioManager: NSObject {
             note.targetVolume = target
             self.activeNotes[noteName] = note
 
+            // Sub-octave companion — always created, volume = 0 when blend is off.
+            let subPlayer = AVAudioPlayerNode()
+            let subPitch   = AVAudioUnitTimePitch()
+            subPitch.pitch = -1200 + self.fineTuneCents   // −1 octave, tracking fine tune
+            self.engine.attach(subPlayer)
+            self.engine.attach(subPitch)
+            self.engine.connect(subPlayer, to: subPitch,      format: bufferFormat)
+            self.engine.connect(subPitch,  to: self.effectsBus, format: bufferFormat)
+            note.subPlayer = subPlayer
+            note.subPitch  = subPitch
+            let subVol = (target * self.subOctaveMix).clamped(to: 0...1)
+            subPlayer.volume = subVol
+            subPlayer.scheduleBuffer(note.buffer, at: nil, options: .loops, completionHandler: nil)
+            subPlayer.play()
+
             self.updateNowPlayingInfo()
             self.scheduleLoopingBuffer(for: note)
             // Start silent and fade up — eliminates the click and gives a
@@ -477,6 +548,13 @@ final class AudioManager: NSObject {
     private func teardown(_ note: ActiveNote) {
         note.isStopping = true
         note.player.stop()
+        note.subPlayer?.stop()
+        if let sp = note.subPlayer, let sPitch = note.subPitch {
+            engine.disconnectNodeOutput(sPitch)
+            engine.disconnectNodeOutput(sp)
+            engine.detach(sp)
+            engine.detach(sPitch)
+        }
         engine.disconnectNodeOutput(note.pitch)
         engine.disconnectNodeOutput(note.player)
         engine.detach(note.player)
@@ -549,6 +627,39 @@ final class AudioManager: NSObject {
         }
     }
 
+    func updateOctaveBlend(_ mix: Float) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.subOctaveMix = mix.clamped(to: 0...1)
+            for (_, note) in self.activeNotes where !note.isStopping {
+                let baseVol = (self.currentMasterVolume * note.volume).clamped(to: 0...1)
+                note.subPlayer?.volume = (baseVol * self.subOctaveMix).clamped(to: 0...1)
+            }
+        }
+    }
+
+    func updateWarmth(_ amount: Float) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.warmth = amount.clamped(to: 0...1)
+            // Max 25 % wet — beyond that it distorts rather than warms.
+            self.warmthUnit.wetDryMix = amount * 25
+        }
+    }
+
+    func updateCompressor(_ amount: Float) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.compressionAmount = amount.clamped(to: 0...1)
+            let threshold  = -amount * 28        // 0 → −28 dB
+            let masterGain =  amount * 8         // up to +8 dB makeup gain
+            AudioUnitSetParameter(self.compressorUnit.audioUnit,
+                                  0, kAudioUnitScope_Global, 0, threshold, 0)
+            AudioUnitSetParameter(self.compressorUnit.audioUnit,
+                                  6, kAudioUnitScope_Global, 0, Float(masterGain), 0)
+        }
+    }
+
     // MARK: - 3-band EQ (each gain in dB, -12...+12)
 
     func updateEQ(low: Float, mid: Float, high: Float) {
@@ -568,9 +679,21 @@ final class AudioManager: NSObject {
             let clamped = max(40, min(240, bpm))
             guard clamped != self.metronomeBPM else { return }
             self.metronomeBPM = clamped
-            // No timer restart needed — scheduleNextBeat() reads metronomeBPM
-            // fresh on every beat, so the new tempo takes effect automatically
-            // at the next beat boundary without interrupting the current count.
+
+            // The self-rescheduling chain already picks up metronomeBPM at every
+            // beat boundary, so slow drags take effect automatically.
+            // For fast or large changes we also schedule a one-shot reschedule
+            // from .now() — debounced 150 ms — so that once the slider settles
+            // the new tempo is heard within one beat of lifting the finger rather
+            // than waiting for the remainder of the old (possibly long) interval.
+            guard self.metronomeRunning else { return }
+            self.pendingBPMWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self, self.metronomeRunning else { return }
+                self.scheduleNextBeat()
+            }
+            self.pendingBPMWorkItem = work
+            self.queue.asyncAfter(deadline: .now() + 0.15, execute: work)
         }
     }
 
@@ -626,6 +749,8 @@ final class AudioManager: NSObject {
             guard let self = self else { return }
             // Bump generation so any queued work item is a no-op when it fires.
             self.metronomeGeneration += 1
+            self.pendingBPMWorkItem?.cancel()
+            self.pendingBPMWorkItem = nil
             self.metronomeWorkItem?.cancel()
             self.metronomeWorkItem = nil
             self.metronomePlayer.stop()
@@ -675,16 +800,23 @@ final class AudioManager: NSObject {
             // If a fade is in progress it'll converge on the new target.
             // Otherwise apply immediately.
             note.player.volume = vol
+            note.subPlayer?.volume = (vol * self.subOctaveMix).clamped(to: 0...1)
         }
     }
+
+    // Track most-recent master volume for sub-octave blend calculations.
+    private var currentMasterVolume: Float = 1.0
 
     func updateMasterVolume(_ masterVolume: Float) {
         queue.async { [weak self] in
             guard let self = self else { return }
+            self.currentMasterVolume = masterVolume
             for (_, note) in self.activeNotes {
                 let vol = max(0, min(1, masterVolume * note.volume))
                 note.targetVolume = vol
                 note.player.volume = vol
+                let subVol = (vol * self.subOctaveMix).clamped(to: 0...1)
+                note.subPlayer?.volume = subVol
             }
         }
     }
@@ -693,9 +825,7 @@ final class AudioManager: NSObject {
         reverbMix reverbVal: Float,
         fineTune: Float,
         echoMix echoVal: Float,
-        echoDelay echoDelayVal: Float,
-        delayMix delayVal: Float,
-        delayTime delayTimeVal: Float
+        echoDelay echoDelayVal: Float
     ) {
         queue.async { [weak self] in
             guard let self = self else { return }
@@ -704,6 +834,7 @@ final class AudioManager: NSObject {
                 self.fineTuneCents = fineTune
                 for (_, note) in self.activeNotes {
                     note.pitch.pitch = fineTune
+                    note.subPitch?.pitch = -1200 + fineTune
                 }
             }
 
@@ -714,6 +845,7 @@ final class AudioManager: NSObject {
             let reverbT = reverbVal > 0 ? sqrt(reverbVal / 100.0) : 0
             self.reverbUnit.wetDryMix = Float(min(100.0, reverbT * 200.0))
 
+            let echoChanged = echoVal != self.echoMix || echoDelayVal != self.echoDelayMs
             self.echoMix = echoVal
             self.echoDelayMs = echoDelayVal
             self.echoUnit.delayTime = TimeInterval(max(0.05, min(2.0, echoDelayVal / 1000.0)))
@@ -722,13 +854,7 @@ final class AudioManager: NSObject {
             // Feedback 90–98 %: 2× previous 78–97 % (capped at 98 to avoid runaway)
             self.echoUnit.feedback = 90 + echoVal * 8    // 90–98 %
 
-            self.delayMix = delayVal
-            self.delayTimeMs = delayTimeVal
-            self.delayUnit.delayTime = TimeInterval(max(0.05, min(2.0, delayTimeVal / 1000.0)))
-            // Delay wetDryMix: 2× — full wet at slider = 0.5
-            self.delayUnit.wetDryMix = min(100, delayVal * 200)
-            // Feedback 86–97 %: 2× previous 72–95 % (capped at 97)
-            self.delayUnit.feedback = 86 + delayVal * 11  // 86–97 %
+            _ = echoChanged  // suppress unused warning; kept for potential future use
         }
     }
 
@@ -825,6 +951,8 @@ final class AudioManager: NSObject {
             self.watchdog?.cancel()
             self.watchdog = nil
             self.metronomeGeneration += 1
+            self.pendingBPMWorkItem?.cancel()
+            self.pendingBPMWorkItem = nil
             self.metronomeWorkItem?.cancel()
             self.metronomeWorkItem = nil
             self.metronomePlayer.stop()
@@ -848,5 +976,11 @@ final class AudioManager: NSObject {
             self.remoteCommandsConfigured = false
             print("AudioManager released")
         }
+    }
+}
+
+private extension Float {
+    func clamped(to range: ClosedRange<Float>) -> Float {
+        min(max(self, range.lowerBound), range.upperBound)
     }
 }
