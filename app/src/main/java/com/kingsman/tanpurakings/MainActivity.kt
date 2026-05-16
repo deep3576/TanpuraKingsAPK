@@ -757,7 +757,12 @@ object AudioManager {
         activePlayers.values.forEach { runCatching { it.stop() }; it.release() }
         activePlayers.clear(); noteVolumes.clear()
         updateMediaSession()
-        stopPlaybackService()
+        // Keep the foreground service (and its notification) alive when a
+        // snapshot exists — the lock-screen Play button must remain visible so
+        // the user can resume without opening the app.
+        // The service is stopped when the snapshot is consumed (onPlay) or when
+        // the user explicitly stops everything with no snapshot.
+        if (pausedNotesSnapshot.isEmpty()) stopPlaybackService()
     }
 
     fun updateEffects(
@@ -924,6 +929,10 @@ object AudioManager {
                     if (snap.isEmpty()) return
                     pausedNotesSnapshot = emptyMap()
                     pausedForFocus = false
+                    // Restart the foreground service so its notification is live
+                    // before the first note is created (avoids a gap where the
+                    // service is absent between onPlay() and playNote() launching).
+                    startPlaybackService()
                     val master = currentMasterVolume
                     val scope = coroutineScope ?: return
                     scope.launch { snap.forEach { (name, nv) -> playNote(name, master, nv) } }

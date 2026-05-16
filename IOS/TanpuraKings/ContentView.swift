@@ -118,8 +118,27 @@ struct DroneView: View {
     @State private var playbackStart: Date? = nil
 
     // MARK: - Body
+    // Split across two computed properties so Swift's type-checker does not
+    // time out on a single expression with 15+ chained .onChange modifiers.
 
     var body: some View {
+        // Second half: EQ, stereo width, metronome.
+        effectsLayerView
+            .onChange(of: eqLow)           { _, _   in pushEQ() }
+            .onChange(of: eqMid)           { _, _   in pushEQ() }
+            .onChange(of: eqHigh)          { _, _   in pushEQ() }
+            .onChange(of: stereoWidth)     { _, v   in AudioManager.shared.updateStereoWidth(v) }
+            .onChange(of: metronomeOn)     { _, on  in
+                if on { AudioManager.shared.startMetronome() }
+                else  { AudioManager.shared.stopMetronome()  }
+            }
+            .onChange(of: metronomeBPM)    { _, bpm in AudioManager.shared.setMetronomeBPM(bpm) }
+            .onChange(of: metronomeVolume) { _, v   in AudioManager.shared.setMetronomeVolume(v) }
+    }
+
+    // First half: layout + timer + core audio effects.
+    @ViewBuilder
+    private var effectsLayerView: some View {
         ZStack {
             appGradient.ignoresSafeArea()
             if isIPad {
@@ -135,24 +154,14 @@ struct DroneView: View {
                 playbackStart = Date()       // first note → start clock
             }
         }
-        .onChange(of: masterVolume)    { _, v   in AudioManager.shared.updateMasterVolume(v) }
-        .onChange(of: reverb)          { _, _   in pushEffects() }
-        .onChange(of: fineTune)        { _, _   in pushEffects() }
-        .onChange(of: echoMix)         { _, _   in pushEffects() }
-        .onChange(of: echoDelay)       { _, _   in pushEffects() }
+        .onChange(of: masterVolume)      { _, v in AudioManager.shared.updateMasterVolume(v) }
+        .onChange(of: reverb)            { _, _ in pushEffects() }
+        .onChange(of: fineTune)          { _, _ in pushEffects() }
+        .onChange(of: echoMix)           { _, _ in pushEffects() }
+        .onChange(of: echoDelay)         { _, _ in pushEffects() }
         .onChange(of: subOctaveMix)      { _, v in AudioManager.shared.updateOctaveBlend(v) }
         .onChange(of: warmth)            { _, v in AudioManager.shared.updateWarmth(v) }
         .onChange(of: compressionAmount) { _, v in AudioManager.shared.updateCompressor(v) }
-        .onChange(of: eqLow)           { _, _   in pushEQ() }
-        .onChange(of: eqMid)           { _, _   in pushEQ() }
-        .onChange(of: eqHigh)          { _, _   in pushEQ() }
-        .onChange(of: stereoWidth)     { _, v   in AudioManager.shared.updateStereoWidth(v) }
-        .onChange(of: metronomeOn)     { _, on  in
-            if on { AudioManager.shared.startMetronome() }
-            else  { AudioManager.shared.stopMetronome()  }
-        }
-        .onChange(of: metronomeBPM)    { _, bpm in AudioManager.shared.setMetronomeBPM(bpm) }
-        .onChange(of: metronomeVolume) { _, v   in AudioManager.shared.setMetronomeVolume(v) }
     }
 
     // MARK: - Shared gradient

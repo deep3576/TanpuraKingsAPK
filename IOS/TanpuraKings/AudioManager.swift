@@ -294,7 +294,9 @@ final class AudioManager: NSObject {
         echoUnit.feedback = 97   // 2× previous 85 (capped near 100)
         echoUnit.wetDryMix = 0
 
-        warmthUnit.loadFactoryPreset(.softDistortionFullWave)
+        // .multiDistortedFunk is the closest Apple preset to analog tube saturation.
+        // At low wetDryMix it adds harmonic richness without harshness.
+        warmthUnit.loadFactoryPreset(.multiDistortedFunk)
         warmthUnit.preGain    = -4   // mild attenuation — lets saturation character come through
         warmthUnit.wetDryMix  = 0    // start dry; updated by updateWarmth()
 
@@ -486,6 +488,9 @@ final class AudioManager: NSObject {
             guard self.isInitialized else { return }
             guard self.activeNotes.count < MAX_ACTIVE_NOTES else { return }
             guard self.activeNotes[noteName] == nil else { return }
+            // Clear any stale lock-screen snapshot — the user is taking manual
+            // control, so the paused widget should not linger after they tap a note.
+            self.pausedSnapshot = [:]
 
             let key = self.fileKey(from: noteName)
             guard let url = self.audioFileURLs[key] else {
@@ -954,11 +959,13 @@ final class AudioManager: NSObject {
     /// Updates MPNowPlayingInfoCenter with the current active note names.
     /// Call this from the audio queue whenever activeNotes changes.
     private func updateNowPlayingInfo() {
-        let names      = activeNotes.keys.sorted()
-        let playing    = !names.isEmpty
-        // When paused but a snapshot exists, keep the widget visible with a
-        // paused rate so the lock-screen Play button remains tappable.
-        let hasSnapshot = !pausedSnapshot.isEmpty
+        // Capture all audio-queue values here before crossing to the main queue.
+        // Accessing self.pausedSnapshot inside DispatchQueue.main.async would be
+        // a data race — the audio queue can mutate it while the main queue reads it.
+        let names          = activeNotes.keys.sorted()
+        let playing        = !names.isEmpty
+        let snapshotNames  = pausedSnapshot.keys.sorted()   // captured on audio queue ✓
+        let hasSnapshot    = !snapshotNames.isEmpty
 
         DispatchQueue.main.async {
             // Notify CarPlaySceneDelegate (and any other observer) that the
@@ -977,10 +984,8 @@ final class AudioManager: NSObject {
             var info: [String: Any] = [:]
             info[MPMediaItemPropertyTitle]                    = "Tanpura Kings"
             // Show last-played notes even when paused so the user knows what
-            // will resume.
-            let displayNames = playing
-                ? names
-                : self.pausedSnapshot.keys.sorted()
+            // will resume. Use the captured copies — no self access needed.
+            let displayNames = playing ? names : snapshotNames
             info[MPMediaItemPropertyArtist]                   = displayNames.joined(separator: " • ")
             info[MPMediaItemPropertyAlbumTitle]               = "Tanpura Drone"
             // playbackRate 0 = paused (shows Play button); 1 = playing (shows Pause)
