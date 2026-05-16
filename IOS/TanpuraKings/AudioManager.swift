@@ -25,10 +25,14 @@ final class AudioManager: NSObject {
     // Metronome runs on its own player on a separate branch into the main
     // mixer, so it bypasses the reverb/delay/echo chain.
     private let metronomePlayer = AVAudioPlayerNode()
-    // Immutable PCM buffer loaded once at startup. Using a buffer instead of
-    // a shared AVAudioFile eliminates the data race where file.framePosition=0
+    // Immutable short PCM buffer loaded once at startup. Using a buffer instead
+    // of a shared AVAudioFile eliminates the data race where file.framePosition=0
     // was called while the engine render thread was still reading from the same
-    // file object, silently dropping or corrupting clicks.
+    // file object, silently dropping or corrupting clicks. The bundled MP3 is
+    // longer than a beat at high tempos because of its trailing silence, so we
+    // trim it to the audible attack before scheduling it; otherwise
+    // AVAudioPlayerNode queues the next click behind the previous full buffer
+    // and the tempo slider appears to do nothing.
     // Guaranteed non-nil after initializeIfNeeded() — falls back to a
     // programmatic sine burst if click.mp3 can't be loaded.
     private var metronomeBuffer: AVAudioPCMBuffer?
@@ -47,6 +51,7 @@ final class AudioManager: NSObject {
     private var metronomeRunning = false
     private var metronomeBPM: Float = 80
     private var metronomeVolume: Float = 0.7
+    private let metronomeClickDurationMs = 55.0
 
     private var isInitialized = false
     private var remoteCommandsConfigured = false
@@ -498,8 +503,7 @@ final class AudioManager: NSObject {
     /// without any conversion step.
     private func makeClickBuffer() -> AVAudioPCMBuffer? {
         let sr         = processingFormat.sampleRate
-        let durationMs = 55.0                          // ms — natural percussive length
-        let frameCount = AVAudioFrameCount(sr * durationMs / 1000.0)
+        let frameCount = AVAudioFrameCount(sr * metronomeClickDurationMs / 1000.0)
         guard let buf  = AVAudioPCMBuffer(pcmFormat: processingFormat,
                                           frameCapacity: frameCount) else { return nil }
         buf.frameLength = frameCount
@@ -514,6 +518,46 @@ final class AudioManager: NSObject {
             }
         }
         return buf
+    }
+
+    /// Keeps only the audible attack of the click sample. The bundled MP3 is
+    /// about 0.8 s long, and `scheduleBuffer(_:at:nil:)` appends each buffer to
+    /// the player node's queue. If we schedule the full file, tempos above the
+    /// file duration cannot play faster than the file itself, so live BPM slider
+    /// changes sound stuck. A short percussive buffer lets the timer interval
+    /// control the beat spacing.
+    private func trimmedMetronomeBuffer(from source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let format = source.format
+        let maxFrames = AVAudioFrameCount(format.sampleRate * metronomeClickDurationMs / 1000.0)
+        let frameCount = min(source.frameLength, maxFrames)
+        guard frameCount > 0,
+              let trimmed = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            return nil
+        }
+        trimmed.frameLength = frameCount
+
+        if let src = source.floatChannelData, let dst = trimmed.floatChannelData {
+            for channel in 0..<Int(format.channelCount) {
+                dst[channel].assign(from: src[channel], count: Int(frameCount))
+            }
+            return trimmed
+        }
+
+        if let src = source.int16ChannelData, let dst = trimmed.int16ChannelData {
+            for channel in 0..<Int(format.channelCount) {
+                dst[channel].assign(from: src[channel], count: Int(frameCount))
+            }
+            return trimmed
+        }
+
+        if let src = source.int32ChannelData, let dst = trimmed.int32ChannelData {
+            for channel in 0..<Int(format.channelCount) {
+                dst[channel].assign(from: src[channel], count: Int(frameCount))
+            }
+            return trimmed
+        }
+
+        return nil
     }
 
     private func loadMetronomeBuffer() {
@@ -534,8 +578,8 @@ final class AudioManager: NSObject {
                 try file.read(into: srcBuf)
 
                 if srcFmt == processingFormat {
-                    metronomeBuffer = srcBuf
-                    print("AudioManager: click.mp3 loaded (formats match — no conversion)")
+                    metronomeBuffer = trimmedMetronomeBuffer(from: srcBuf) ?? srcBuf
+                    print("AudioManager: click.mp3 loaded and trimmed (formats match — no conversion)")
                     return
                 }
 
@@ -559,8 +603,8 @@ final class AudioManager: NSObject {
                     return srcBuf
                 }
                 if status != .error, dstBuf.frameLength > 0 {
-                    metronomeBuffer = dstBuf
-                    print("AudioManager: click.mp3 loaded (\(srcFmt.channelCount)ch→\(processingFormat.channelCount)ch converted)")
+                    metronomeBuffer = trimmedMetronomeBuffer(from: dstBuf) ?? dstBuf
+                    print("AudioManager: click.mp3 loaded, converted, and trimmed (\(srcFmt.channelCount)ch→\(processingFormat.channelCount)ch)")
                     return
                 }
                 print("AudioManager: converter status=\(status.rawValue) frameLength=\(dstBuf.frameLength) — falling back to synthetic click")
@@ -842,24 +886,30 @@ final class AudioManager: NSObject {
     }
 
     /// Schedules the next beat on `metronomeTimerQueue` (high-priority,
-    /// separate from the audio queue) and reads `metronomeBPM` fresh so that
-    /// slider changes take effect at the very next beat with no restart.
+    /// separate from the audio queue) and reads `metronomeBPM` fresh on the
+    /// audio queue so slider changes take effect at the very next beat without
+    /// racing state between queues.
     ///
     /// Each link in the chain captures the current generation; if
     /// `metronomeGeneration` changes (start/stop) the captured gen no longer
     /// matches and the link silently becomes a no-op, ending the old chain.
     private func scheduleNextBeat() {
         guard metronomeRunning else { return }
-        let gen        = metronomeGeneration
-        // Read BPM fresh every beat — this is the key that makes slider changes
-        // take effect automatically without any timer restart.
+        let gen = metronomeGeneration
+        // Read BPM while already on the audio queue. The timer callback hops
+        // back to this queue before touching metronome state, keeping tempo
+        // changes from the SwiftUI slider synchronized with playback.
         let intervalNs = max(1, Int(60_000_000_000 / Double(metronomeBPM)))
 
-        metronomeTimerQueue.asyncAfter(deadline: .now() + .nanoseconds(intervalNs)) {
-            [weak self] in
-            guard let self = self, self.metronomeGeneration == gen else { return }
-            self.tickMetronome()
-            self.scheduleNextBeat()   // recurse with fresh BPM
+        metronomeTimerQueue.asyncAfter(deadline: .now() + .nanoseconds(intervalNs)) { [weak self] in
+            guard let self = self else { return }
+            self.queue.async { [weak self] in
+                guard let self = self,
+                      self.metronomeRunning,
+                      self.metronomeGeneration == gen else { return }
+                self.tickMetronome()
+                self.scheduleNextBeat()   // recurse with fresh BPM
+            }
         }
     }
 
@@ -875,8 +925,8 @@ final class AudioManager: NSObject {
     }
 
     /// Schedules one click buffer and ensures the player is running.
-    /// Uses only thread-safe AVAudioPlayerNode APIs — safe to call from any
-    /// queue, including metronomeTimerQueue.
+    /// Must be called from the audio queue so metronome state and scheduling
+    /// stay synchronized with live BPM changes.
     private func tickMetronome() {
         guard let buf = metronomeBuffer else { return }
         // Critical order: scheduleBuffer BEFORE play().
