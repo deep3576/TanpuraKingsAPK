@@ -900,10 +900,35 @@ object AudioManager {
             // setFlags() is deprecated — FLAG_HANDLES_MEDIA_BUTTONS and
             // FLAG_HANDLES_TRANSPORT_CONTROLS are set implicitly by setCallback().
             setCallback(object : MediaSessionCompat.Callback() {
-                /** Stop is the only command we fully support — the user must
-                 *  open the app to choose which note to start playing. */
-                override fun onStop()  { stopAllNotes() }
-                override fun onPause() { stopAllNotes() }
+                /** Pause: snapshot active notes then stop so Play can restore them. */
+                override fun onPause() {
+                    if (activePlayers.isNotEmpty()) {
+                        pausedNotesSnapshot = HashMap(noteVolumes)
+                        pausedForFocus = false
+                    }
+                    stopAllNotes()
+                }
+
+                /** Stop: same as pause for a drone — snapshot then stop. */
+                override fun onStop() {
+                    if (activePlayers.isNotEmpty()) {
+                        pausedNotesSnapshot = HashMap(noteVolumes)
+                        pausedForFocus = false
+                    }
+                    stopAllNotes()
+                }
+
+                /** Play: restore whichever notes were playing before pause/stop. */
+                override fun onPlay() {
+                    val snap = pausedNotesSnapshot.toMap()
+                    if (snap.isEmpty()) return
+                    pausedNotesSnapshot = emptyMap()
+                    pausedForFocus = false
+                    val master = currentMasterVolume
+                    val scope = coroutineScope ?: return
+                    scope.launch { snap.forEach { (name, nv) -> playNote(name, master, nv) } }
+                }
+
                 override fun onMediaButtonEvent(intent: Intent): Boolean {
                     // Let MediaButtonReceiver handle the routing; we rely on
                     // onStop/onPause for the actual work.
@@ -941,26 +966,36 @@ object AudioManager {
      * current set of active notes. Call this whenever notes are added or removed.
      */
     private fun updateMediaSession() {
-        val session = mediaSession ?: return
+        val session   = mediaSession ?: return
         val isPlaying = activePlayers.isNotEmpty()
-        val artist = activePlayers.keys.sorted()
-            .joinToString(" • ")
-            .ifEmpty { "Drone" }
+        val hasPause  = pausedNotesSnapshot.isNotEmpty()
+
+        // Show last-played notes even when paused so the user knows what
+        // will resume when they hit Play.
+        val artist = when {
+            isPlaying -> activePlayers.keys.sorted().joinToString(" • ")
+            hasPause  -> pausedNotesSnapshot.keys.sorted().joinToString(" • ")
+            else      -> "Drone"
+        }
+
+        // STATE_PAUSED keeps the Play button visible on the lock screen;
+        // STATE_STOPPED would hide the media widget on some OEMs.
+        val state = when {
+            isPlaying -> PlaybackStateCompat.STATE_PLAYING
+            hasPause  -> PlaybackStateCompat.STATE_PAUSED
+            else      -> PlaybackStateCompat.STATE_STOPPED
+        }
 
         session.setPlaybackState(
             PlaybackStateCompat.Builder()
                 .setActions(
                     PlaybackStateCompat.ACTION_STOP or
                     PlaybackStateCompat.ACTION_PAUSE or
+                    PlaybackStateCompat.ACTION_PLAY or
                     PlaybackStateCompat.ACTION_PLAY_PAUSE or
                     PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID
                 )
-                .setState(
-                    if (isPlaying) PlaybackStateCompat.STATE_PLAYING
-                    else           PlaybackStateCompat.STATE_STOPPED,
-                    PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN,
-                    1f
-                )
+                .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1f)
                 .build()
         )
 

@@ -78,6 +78,10 @@ final class AudioManager: NSObject {
     }
 
     private var activeNotes: [String: ActiveNote] = [:]
+    // Snapshot saved when pause/stop is triggered from the lock screen so the
+    // play button can restore the same set of notes without opening the app.
+    // Keyed by note name, value is the per-note volume (0–1).
+    private var pausedSnapshot: [String: Float] = [:]
     // Only the file URL is stored at startup — the PCM buffer is loaded lazily
     // inside playNote() the moment a note is tapped.  Keeping all 12 files
     // decoded simultaneously blows the 3 GB process limit (each tanpura
@@ -793,11 +797,28 @@ final class AudioManager: NSObject {
     func stopAllNotes() {
         queue.async { [weak self] in
             guard let self = self else { return }
+            // Persist which notes were playing so the lock-screen Play button
+            // can restore them without the user needing to open the app.
+            if !self.activeNotes.isEmpty {
+                self.pausedSnapshot = self.activeNotes.mapValues { $0.volume }
+            }
             for (_, note) in self.activeNotes {
                 self.teardown(note)
             }
             self.activeNotes.removeAll()
             self.updateNowPlayingInfo()
+        }
+    }
+
+    /// Restore the notes that were playing when pause/stop was last called.
+    /// Called by the lock-screen Play and Toggle buttons.
+    private func resumeFromSnapshot() {
+        let snap = self.pausedSnapshot
+        guard !snap.isEmpty else { return }
+        self.pausedSnapshot = [:]
+        let master = self.currentMasterVolume
+        for (name, noteVol) in snap {
+            self.playNote(name, masterVolume: master, noteVolume: noteVol)
         }
     }
 
@@ -888,7 +909,7 @@ final class AudioManager: NSObject {
             $0.isEnabled = false
         }
 
-        // Stop / Pause → stop all active drone notes
+        // Stop / Pause → snapshot active notes then stop them
         cc.stopCommand.isEnabled = true
         cc.stopCommand.addTarget { [weak self] _ in
             self?.stopAllNotes()
@@ -901,16 +922,24 @@ final class AudioManager: NSObject {
             return .success
         }
 
-        // Play is intentionally disabled: the user must open the app to choose
-        // which note(s) to play. A future version could restore the last set.
-        cc.playCommand.isEnabled = false
+        // Play → restore the last snapshot (notes playing before pause/stop)
+        cc.playCommand.isEnabled = true
+        cc.playCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .commandFailed }
+            self.queue.async { self.resumeFromSnapshot() }
+            return .success
+        }
 
-        // Toggle (headphone single-tap, steering-wheel button) → stop if playing
+        // Toggle (headphone single-tap, steering-wheel button) → pause/resume
         cc.togglePlayPauseCommand.isEnabled = true
         cc.togglePlayPauseCommand.addTarget { [weak self] _ in
             guard let self = self else { return .commandFailed }
             self.queue.async {
-                if !self.activeNotes.isEmpty { self.stopAllNotes() }
+                if self.activeNotes.isEmpty {
+                    self.resumeFromSnapshot()
+                } else {
+                    self.stopAllNotes()
+                }
             }
             return .success
         }
@@ -925,8 +954,11 @@ final class AudioManager: NSObject {
     /// Updates MPNowPlayingInfoCenter with the current active note names.
     /// Call this from the audio queue whenever activeNotes changes.
     private func updateNowPlayingInfo() {
-        let names    = activeNotes.keys.sorted()
-        let playing  = !names.isEmpty
+        let names      = activeNotes.keys.sorted()
+        let playing    = !names.isEmpty
+        // When paused but a snapshot exists, keep the widget visible with a
+        // paused rate so the lock-screen Play button remains tappable.
+        let hasSnapshot = !pausedSnapshot.isEmpty
 
         DispatchQueue.main.async {
             // Notify CarPlaySceneDelegate (and any other observer) that the
@@ -936,18 +968,26 @@ final class AudioManager: NSObject {
                 object: nil
             )
 
-            guard playing else {
+            // Remove the widget only when nothing is playing AND there is
+            // nothing to resume.
+            guard playing || hasSnapshot else {
                 MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
                 return
             }
             var info: [String: Any] = [:]
-            info[MPMediaItemPropertyTitle]                   = "Tanpura Kings"
-            info[MPMediaItemPropertyArtist]                  = names.joined(separator: " • ")
-            info[MPMediaItemPropertyAlbumTitle]              = "Tanpura Drone"
-            info[MPNowPlayingInfoPropertyPlaybackRate]       = Float(1.0)
+            info[MPMediaItemPropertyTitle]                    = "Tanpura Kings"
+            // Show last-played notes even when paused so the user knows what
+            // will resume.
+            let displayNames = playing
+                ? names
+                : self.pausedSnapshot.keys.sorted()
+            info[MPMediaItemPropertyArtist]                   = displayNames.joined(separator: " • ")
+            info[MPMediaItemPropertyAlbumTitle]               = "Tanpura Drone"
+            // playbackRate 0 = paused (shows Play button); 1 = playing (shows Pause)
+            info[MPNowPlayingInfoPropertyPlaybackRate]        = playing ? Float(1.0) : Float(0.0)
             info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = Double(0)
             // Use a 24-hour duration so the lock screen shows no progress bar
-            info[MPMediaItemPropertyPlaybackDuration]        = Double(86_400)
+            info[MPMediaItemPropertyPlaybackDuration]         = Double(86_400)
             if let image = UIImage(named: "Logo") {
                 info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(
                     boundsSize: CGSize(width: 512, height: 512)) { _ in image }
