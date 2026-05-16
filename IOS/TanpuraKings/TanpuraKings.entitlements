@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        com.apple.developer.carplay-audio is intentionally omitted here.
+
+        Apple must grant this entitlement before it can be embedded in a
+        provisioning profile.  Request it at:
+          https://developer.apple.com/contact/request/carplay
+
+        Once Apple approves the entitlement for your App ID (com.kingsman.tanpurakings),
+        regenerate your provisioning profile in Xcode and then uncomment the
+        two lines below — the rest of the CarPlay code (CarPlaySceneDelegate,
+        Info.plist scene config, etc.) is already in place and will activate
+        automatically.
+
+        <key>com.apple.developer.carplay-audio</key>
+        <true/>
+    -->
+</dict>
+</plist>

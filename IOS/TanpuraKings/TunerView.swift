@@ -177,7 +177,7 @@ private struct TuningStatusCard: View {
                                 .frame(width: barW)
                                 .clipShape(
                                     .rect(topLeadingRadius: 14, bottomLeadingRadius: 14,
-                                          topTrailingRadius: 0, bottomTrailingRadius: 0)
+                                          bottomTrailingRadius: 0, topTrailingRadius: 0)
                                 )
                             Spacer(minLength: 0)
                         }
@@ -190,7 +190,7 @@ private struct TuningStatusCard: View {
                                 .frame(width: barW)
                                 .clipShape(
                                     .rect(topLeadingRadius: 0, bottomLeadingRadius: 0,
-                                          topTrailingRadius: 14, bottomTrailingRadius: 14)
+                                          bottomTrailingRadius: 14, topTrailingRadius: 14)
                                 )
                         }
                     }

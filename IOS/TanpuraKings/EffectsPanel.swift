@@ -6,8 +6,9 @@ struct EffectsPanel: View {
     @Binding var fineTune: Float
     @Binding var echoMix: Float
     @Binding var echoDelay: Float
-    @Binding var delayMix: Float
-    @Binding var delayTime: Float
+    @Binding var subOctaveMix:      Float
+    @Binding var warmth:            Float
+    @Binding var compressionAmount: Float
     @Binding var eqLow: Float
     @Binding var eqMid: Float
     @Binding var eqHigh: Float
@@ -83,19 +84,31 @@ struct EffectsPanel: View {
                 formatter: { "\(Int($0)) ms" }
             )
 
-            sectionHeader("Delay")
+            sectionHeader("Octave Blend")
             SliderWithLabel(
-                label: "Mix",
-                value: $delayMix,
+                label: "Sub Octave",
+                value: $subOctaveMix,
                 range: 0...1,
-                color: Color(red: 1.0, green: 165/255, blue: 0)
+                color: Color(red: 0.6, green: 0.4, blue: 1.0),
+                formatter: { String(format: "%.0f%%", $0 * 100) }
             )
+
+            sectionHeader("Warmth")
             SliderWithLabel(
-                label: "Time",
-                value: $delayTime,
-                range: 50...2000,
-                color: Color(red: 1.0, green: 165/255, blue: 0),
-                formatter: { "\(Int($0)) ms" }
+                label: "Saturation",
+                value: $warmth,
+                range: 0...1,
+                color: Color(red: 1.0, green: 0.55, blue: 0.1),
+                formatter: { String(format: "%.0f%%", $0 * 100) }
+            )
+
+            sectionHeader("Compressor")
+            SliderWithLabel(
+                label: "Amount",
+                value: $compressionAmount,
+                range: 0...1,
+                color: Color(red: 0.9, green: 0.2, blue: 0.3),
+                formatter: { String(format: "%.0f%%", $0 * 100) }
             )
         }
         .padding(8)

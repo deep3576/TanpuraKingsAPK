@@ -6,6 +6,13 @@
     <!-- Mic input for the chromatic tuner. Audio is processed only on the
          device — never recorded or sent anywhere. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Foreground service: keeps the process alive while the drone plays
+         in the background.  Without this Android kills the process in ~60 s. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Required on Android 14+ for mediaPlayback foreground service type. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Required on Android 13+ to show the persistent playback notification. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
@@ -28,6 +35,46 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Foreground service that prevents Android from killing the process
+             while the tanpura drone is playing in the background.
+             foregroundServiceType="mediaPlayback" is required on Android 14+. -->
+        <service
+            android:name=".AudioPlaybackService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </service>
+
+        <!-- Routes hardware media-button events (headset, steering wheel) to
+             the MediaSession so play/pause/stop work without opening the app. -->
+        <receiver
+            android:name="androidx.media.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Android Auto / Bluetooth media-browser service.
+             Android Auto connects here to browse and play drone notes.
+             foregroundServiceType is inherited from AudioPlaybackService;
+             this service only handles browsing (no separate foreground need). -->
+        <service
+            android:name=".TanpuraMediaBrowserService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+
+        <!-- Tells Android Auto (and Google Play) that this app supports
+             in-car media browsing via the automotive_app_desc descriptor. -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
     </application>
 
 </manifest>
