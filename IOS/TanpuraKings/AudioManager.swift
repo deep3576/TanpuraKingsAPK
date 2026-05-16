@@ -29,21 +29,22 @@ final class AudioManager: NSObject {
     // a shared AVAudioFile eliminates the data race where file.framePosition=0
     // was called while the engine render thread was still reading from the same
     // file object, silently dropping or corrupting clicks.
+    // Guaranteed non-nil after initializeIfNeeded() — falls back to a
+    // programmatic sine burst if click.mp3 can't be loaded.
     private var metronomeBuffer: AVAudioPCMBuffer?
-    // Each beat schedules the next via a DispatchWorkItem so the current BPM
-    // is always read fresh — no timer restart needed when the slider changes.
-    private var metronomeWorkItem: DispatchWorkItem?
-    // Debounce work item: reschedules the beat chain from .now() after the
-    // slider has been idle for 150 ms, giving immediate tempo response.
-    private var pendingBPMWorkItem: DispatchWorkItem?
+    // DispatchSourceTimer fires on its own dedicated .userInteractive queue so
+    // large tanpura file loads on the main audio queue can never delay or drop
+    // a metronome beat.  This replaces the old asyncAfter self-rescheduling
+    // chain, which was the primary cause of missed beats when playNote() was
+    // loading a 100–200 MB PCM buffer on the same serial queue.
+    private var metronomeTimer: DispatchSourceTimer?
+    private let metronomeTimerQueue = DispatchQueue(
+        label: "com.kingsman.tanpurakings.metronome",
+        qos: .userInteractive
+    )
     private var metronomeRunning = false
     private var metronomeBPM: Float = 80
     private var metronomeVolume: Float = 0.7
-    // Bumped every time the timer is (re)started or stopped.
-    // Any event handler that sees a stale generation bails out immediately,
-    // which prevents a queued-but-about-to-fire old event from creating a
-    // second beat chain after the timer has been replaced.
-    private var metronomeGeneration: Int = 0
 
     private var isInitialized = false
     private var remoteCommandsConfigured = false
@@ -255,14 +256,11 @@ final class AudioManager: NSObject {
                     note.subPlayer?.play()
                 }
 
-                // Also restart the metronome if it was running — its player
-                // is stopped by engine.stop() and must be explicitly resumed.
+                // Also restart the metronome if it was running — engine.stop()
+                // halts all attached player nodes, so the player must be
+                // re-kicked and the timer restarted from .now().
                 if self.metronomeRunning {
-                    // tickMetronome schedules the buffer THEN calls play(),
-                    // which is the required order for AVAudioPlayerNode.
-                    self.metronomeGeneration += 1
-                    self.tickMetronome()
-                    self.scheduleNextBeat()
+                    self.startMetronomeTimer(immediate: true)
                 }
             } catch {
                 // Session still contested (common when a Bluetooth ownership
@@ -440,12 +438,15 @@ final class AudioManager: NSObject {
             }
         }
 
-        // Restart the metronome beat chain if it was silenced by an engine
-        // restart (engine.stop() halts all attached player nodes).
-        if metronomeRunning && !metronomePlayer.isPlaying {
-            metronomeGeneration += 1
-            tickMetronome()       // schedule buffer first, then play()
-            scheduleNextBeat()
+        // Restart the metronome if the player went silent (engine.stop() halts
+        // all attached nodes) or the timer was lost.
+        if metronomeRunning {
+            if metronomeTimer == nil {
+                startMetronomeTimer(immediate: true)
+            } else if !metronomePlayer.isPlaying {
+                // Timer is alive but player stalled — re-prime the player.
+                tickMetronome()
+            }
         }
     }
 
@@ -463,52 +464,90 @@ final class AudioManager: NSObject {
         }
     }
 
-    private func loadMetronomeBuffer() {
-        guard let url = Bundle.main.url(forResource: "click", withExtension: "mp3", subdirectory: "Audio")
-            ?? Bundle.main.url(forResource: "click", withExtension: "mp3") else {
-            print("AudioManager: Missing click.mp3 — metronome will be silent")
-            return
+    // MARK: - Click buffer helpers
+
+    /// Builds a short sine-burst click entirely in software — no audio file
+    /// required.  Used as a guaranteed fallback when click.mp3 can't be loaded.
+    /// The result is already in processingFormat, so it schedules directly
+    /// without any conversion step.
+    private func makeClickBuffer() -> AVAudioPCMBuffer? {
+        let sr         = processingFormat.sampleRate
+        let durationMs = 55.0                          // ms — natural percussive length
+        let frameCount = AVAudioFrameCount(sr * durationMs / 1000.0)
+        guard let buf  = AVAudioPCMBuffer(pcmFormat: processingFormat,
+                                          frameCapacity: frameCount) else { return nil }
+        buf.frameLength = frameCount
+        let freq: Double  = 1_200   // Hz — bright, cuts through drone
+        let decay: Double = 55.0    // exp decay rate; higher = shorter tail
+        let channels = Int(processingFormat.channelCount)
+        for ch in 0..<channels {
+            guard let ptr = buf.floatChannelData?[ch] else { continue }
+            for f in 0..<Int(frameCount) {
+                let t = Double(f) / sr
+                ptr[f] = Float(exp(-decay * t) * sin(2.0 * .pi * freq * t))
+            }
         }
-        do {
-            let file      = try AVAudioFile(forReading: url)
-            let srcFmt    = file.processingFormat
-            let srcFrames = AVAudioFrameCount(file.length)
+        return buf
+    }
 
-            // Read the click into native-format samples first.
-            guard let srcBuf = AVAudioPCMBuffer(pcmFormat: srcFmt, frameCapacity: srcFrames) else { return }
-            try file.read(into: srcBuf)
+    private func loadMetronomeBuffer() {
+        // --- Attempt 1: load click.mp3 from the bundle ---
+        if let url = Bundle.main.url(forResource: "click", withExtension: "mp3",
+                                     subdirectory: "Audio")
+                  ?? Bundle.main.url(forResource: "click", withExtension: "mp3") {
+            do {
+                let file      = try AVAudioFile(forReading: url)
+                let srcFmt    = file.processingFormat
+                let srcFrames = AVAudioFrameCount(file.length)
 
-            // The metronomePlayer is connected at processingFormat (44100 Hz, 2ch,
-            // float32). scheduleBuffer requires the buffer to match that format, so
-            // convert if the file is mono or has a different sample rate.
-            if srcFmt == processingFormat {
-                metronomeBuffer = srcBuf
-            } else {
-                guard let converter = AVAudioConverter(from: srcFmt, to: processingFormat) else {
-                    print("AudioManager: Cannot convert click.mp3 to engine format")
+                guard let srcBuf = AVAudioPCMBuffer(pcmFormat: srcFmt,
+                                                    frameCapacity: srcFrames) else {
+                    throw NSError(domain: "AM", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: "srcBuf alloc failed"])
+                }
+                try file.read(into: srcBuf)
+
+                if srcFmt == processingFormat {
+                    metronomeBuffer = srcBuf
+                    print("AudioManager: click.mp3 loaded (formats match — no conversion)")
                     return
                 }
+
+                // Mono or different sample rate → convert to processingFormat.
+                guard let conv = AVAudioConverter(from: srcFmt, to: processingFormat) else {
+                    throw NSError(domain: "AM", code: 2,
+                                  userInfo: [NSLocalizedDescriptionKey: "AVAudioConverter init failed"])
+                }
                 let ratio     = processingFormat.sampleRate / srcFmt.sampleRate
-                let dstFrames = AVAudioFrameCount(Double(srcFrames) * ratio) + 1
+                let dstFrames = AVAudioFrameCount(Double(srcFrames) * ratio) + 64
                 guard let dstBuf = AVAudioPCMBuffer(pcmFormat: processingFormat,
-                                                    frameCapacity: dstFrames) else { return }
-                var inputGiven = false
-                let status = converter.convert(to: dstBuf, error: nil) { _, outStatus in
-                    guard !inputGiven else { outStatus.pointee = .endOfStream; return nil }
-                    inputGiven = true
+                                                    frameCapacity: dstFrames) else {
+                    throw NSError(domain: "AM", code: 3,
+                                  userInfo: [NSLocalizedDescriptionKey: "dstBuf alloc failed"])
+                }
+                var fed = false
+                let status = conv.convert(to: dstBuf, error: nil) { _, outStatus in
+                    guard !fed else { outStatus.pointee = .endOfStream; return nil }
+                    fed = true
                     outStatus.pointee = .haveData
                     return srcBuf
                 }
-                if status != .error {
+                if status != .error, dstBuf.frameLength > 0 {
                     metronomeBuffer = dstBuf
-                } else {
-                    print("AudioManager: AVAudioConverter failed for click.mp3")
+                    print("AudioManager: click.mp3 loaded (\(srcFmt.channelCount)ch→\(processingFormat.channelCount)ch converted)")
+                    return
                 }
+                print("AudioManager: converter status=\(status.rawValue) frameLength=\(dstBuf.frameLength) — falling back to synthetic click")
+            } catch {
+                print("AudioManager: click.mp3 load error: \(error) — falling back to synthetic click")
             }
-            print("AudioManager: Metronome buffer ready — \(srcFmt) → \(processingFormat)")
-        } catch {
-            print("AudioManager: Metronome buffer load error: \(error)")
+        } else {
+            print("AudioManager: click.mp3 not found in bundle — using synthetic click")
         }
+
+        // --- Attempt 2: programmatic sine-burst ---
+        metronomeBuffer = makeClickBuffer()
+        print("AudioManager: Synthetic click buffer \(metronomeBuffer == nil ? "FAILED" : "ready")")
     }
 
     private func fileKey(from noteName: String) -> String {
@@ -743,21 +782,11 @@ final class AudioManager: NSObject {
             let clamped = max(40, min(240, bpm))
             guard clamped != self.metronomeBPM else { return }
             self.metronomeBPM = clamped
-
-            // The self-rescheduling chain already picks up metronomeBPM at every
-            // beat boundary, so slow drags take effect automatically.
-            // For fast or large changes we also schedule a one-shot reschedule
-            // from .now() — debounced 150 ms — so that once the slider settles
-            // the new tempo is heard within one beat of lifting the finger rather
-            // than waiting for the remainder of the old (possibly long) interval.
-            guard self.metronomeRunning else { return }
-            self.pendingBPMWorkItem?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self = self, self.metronomeRunning else { return }
-                self.scheduleNextBeat()
+            // Reschedule the timer at the new interval; fires immediately so
+            // the tempo change is heard within one beat of lifting the finger.
+            if self.metronomeRunning {
+                self.startMetronomeTimer(immediate: false)
             }
-            self.pendingBPMWorkItem = work
-            self.queue.asyncAfter(deadline: .now() + 0.15, execute: work)
         }
     }
 
@@ -771,64 +800,78 @@ final class AudioManager: NSObject {
 
     func startMetronome() {
         queue.async { [weak self] in
-            guard let self = self, self.isInitialized, self.metronomeBuffer != nil else { return }
+            guard let self = self, self.isInitialized else { return }
             guard !self.metronomeRunning else { return }
+            // metronomeBuffer is guaranteed non-nil after initializeIfNeeded()
+            // (makeClickBuffer() fallback ensures it). Guard is a safety net only.
+            guard self.metronomeBuffer != nil else {
+                print("AudioManager: startMetronome — buffer is nil, cannot start")
+                return
+            }
             self.metronomeRunning = true
             self.metronomePlayer.volume = self.metronomeVolume
-            // Bump generation to invalidate any lingering work item from a
-            // previous run, then fire the first click immediately.
-            self.metronomeGeneration += 1
-            self.tickMetronome()
-            self.scheduleNextBeat()
+            self.startMetronomeTimer(immediate: true)
         }
     }
 
-    // Schedules one DispatchWorkItem for the next beat using the CURRENT
-    // metronomeBPM value.  The work item fires the click, then calls this
-    // function again — forming a self-rescheduling chain.
-    //
-    // Because each link in the chain reads metronomeBPM fresh, a slider drag
-    // is picked up at the very next beat with zero timer restarts or debounce.
-    private func scheduleNextBeat() {
-        metronomeWorkItem?.cancel()
-        metronomeWorkItem = nil
-
+    /// Creates (or replaces) the DispatchSourceTimer that drives each beat.
+    ///
+    /// Runs on its own `.userInteractive` queue (`metronomeTimerQueue`) so it
+    /// is never blocked by file-loading work on the main audio queue.  This
+    /// was the primary cause of the old `asyncAfter` chain missing beats when
+    /// `playNote()` was loading a 100–200 MB tanpura file.
+    ///
+    /// - Parameter immediate: `true` → fire the first click right now (use
+    ///   when starting fresh); `false` → wait one interval before the first
+    ///   click (use when restarting for a BPM change so we don't double-tick).
+    ///
+    /// Must be called on `queue`.
+    private func startMetronomeTimer(immediate: Bool) {
+        // Cancel any in-flight timer first. GCD cancel() is thread-safe and
+        // idempotent; the event handler, if currently executing, finishes
+        // naturally but checks metronomeRunning before doing work.
+        metronomeTimer?.cancel()
+        metronomeTimer = nil
         guard metronomeRunning else { return }
 
-        let gen        = metronomeGeneration
-        let intervalMs = max(1, Int(60_000.0 / Double(metronomeBPM)))
-
-        let item = DispatchWorkItem { [weak self] in
-            guard let self = self, self.metronomeGeneration == gen else { return }
+        let intervalNs = max(1, Int(60_000_000_000 / Double(metronomeBPM)))
+        let timer = DispatchSource.makeTimerSource(queue: metronomeTimerQueue)
+        let start: DispatchTime = immediate ? .now() : (.now() + .nanoseconds(intervalNs))
+        // leeway 5 ms: tight enough for music, small enough to not burn battery.
+        timer.schedule(deadline: start,
+                       repeating: .nanoseconds(intervalNs),
+                       leeway: .milliseconds(5))
+        timer.setEventHandler { [weak self] in
+            // tickMetronome uses only thread-safe AVAudioPlayerNode APIs
+            // (scheduleBuffer, isPlaying, play) — safe to call from any queue.
+            guard let self = self, self.metronomeRunning else { return }
             self.tickMetronome()
-            self.scheduleNextBeat()
         }
-        metronomeWorkItem = item
-        queue.asyncAfter(deadline: .now() + .milliseconds(intervalMs), execute: item)
+        timer.resume()
+        metronomeTimer = timer
     }
 
     func stopMetronome() {
         queue.async { [weak self] in
             guard let self = self else { return }
-            // Bump generation so any queued work item is a no-op when it fires.
-            self.metronomeGeneration += 1
-            self.pendingBPMWorkItem?.cancel()
-            self.pendingBPMWorkItem = nil
-            self.metronomeWorkItem?.cancel()
-            self.metronomeWorkItem = nil
-            self.metronomePlayer.stop()
+            // Set flag first so any in-flight timer event handler bails out
+            // before calling tickMetronome() after the player is stopped.
             self.metronomeRunning = false
+            self.metronomeTimer?.cancel()
+            self.metronomeTimer = nil
+            self.metronomePlayer.stop()
         }
     }
 
+    /// Schedules one click buffer and ensures the player is running.
+    /// All APIs used here (scheduleBuffer, isPlaying, play) are documented as
+    /// thread-safe on AVAudioPlayerNode and may be called from any thread.
     private func tickMetronome() {
         guard let buf = metronomeBuffer else { return }
-        // Critical order: schedule BEFORE play().
-        // If play() is called first on an idle player, it starts rendering
-        // silence and the scheduled buffer arrives too late — the first
-        // milliseconds of the click are silently dropped, causing a dead beat.
-        // Scheduling first guarantees the buffer is in the queue the instant
-        // the player node starts producing output.
+        // Critical order: scheduleBuffer BEFORE play().
+        // Calling play() on an idle player with no buffer queued causes it to
+        // start rendering silence; when the buffer arrives a few µs later the
+        // first frame is already gone, producing a silent or clipped beat.
         metronomePlayer.scheduleBuffer(buf, at: nil, options: [], completionHandler: nil)
         if !metronomePlayer.isPlaying { metronomePlayer.play() }
     }
@@ -1052,13 +1095,10 @@ final class AudioManager: NSObject {
             guard let self = self else { return }
             self.watchdog?.cancel()
             self.watchdog = nil
-            self.metronomeGeneration += 1
-            self.pendingBPMWorkItem?.cancel()
-            self.pendingBPMWorkItem = nil
-            self.metronomeWorkItem?.cancel()
-            self.metronomeWorkItem = nil
+            self.metronomeRunning = false   // stop flag before cancel so handler bails
+            self.metronomeTimer?.cancel()
+            self.metronomeTimer = nil
             self.metronomePlayer.stop()
-            self.metronomeRunning = false
             for (_, note) in self.activeNotes {
                 self.teardown(note)
             }
