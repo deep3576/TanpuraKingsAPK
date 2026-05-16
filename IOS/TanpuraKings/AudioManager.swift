@@ -291,20 +291,25 @@ final class AudioManager: NSObject {
         echoUnit.wetDryMix = 0
 
         warmthUnit.loadFactoryPreset(.softDistortionFullWave)
-        warmthUnit.preGain    = -8   // prevent clipping before saturation
+        warmthUnit.preGain    = -4   // mild attenuation — lets saturation character come through
         warmthUnit.wetDryMix  = 0    // start dry; updated by updateWarmth()
 
-        // Compressor: bypass at startup (threshold = 0 dB = no compression)
+        // Compressor: bypass at startup.
+        // Ratio is fixed at 8:1 (param 2) — aggressive enough to be clearly
+        // audible as the slider increases. Threshold and makeup gain are set
+        // dynamically by updateCompressor().
         AudioUnitSetParameter(compressorUnit.audioUnit, 0,
-                              kAudioUnitScope_Global, 0, 0, 0)   // threshold 0 dB
+                              kAudioUnitScope_Global, 0, 0, 0)    // threshold 0 dB (bypass)
         AudioUnitSetParameter(compressorUnit.audioUnit, 1,
-                              kAudioUnitScope_Global, 0, 5, 0)   // headroom 5 dB
+                              kAudioUnitScope_Global, 0, 5, 0)    // headroom 5 dB
+        AudioUnitSetParameter(compressorUnit.audioUnit, 2,
+                              kAudioUnitScope_Global, 0, 8, 0)    // ratio 8:1 — clearly audible
         AudioUnitSetParameter(compressorUnit.audioUnit, 4,
-                              kAudioUnitScope_Global, 0, 0.01, 0) // attack 10 ms
+                              kAudioUnitScope_Global, 0, 0.005, 0) // attack 5 ms
         AudioUnitSetParameter(compressorUnit.audioUnit, 5,
-                              kAudioUnitScope_Global, 0, 0.15, 0) // release 150 ms
+                              kAudioUnitScope_Global, 0, 0.15, 0)  // release 150 ms
         AudioUnitSetParameter(compressorUnit.audioUnit, 6,
-                              kAudioUnitScope_Global, 0, 0, 0)   // master gain 0 dB
+                              kAudioUnitScope_Global, 0, 0, 0)    // master gain 0 dB
 
         // 3-band EQ: low shelf @ 100 Hz, mid parametric @ 1 kHz, high shelf @ 8 kHz.
         // Default gain = 0 dB (flat). User adjusts per band via the UI.
@@ -642,8 +647,9 @@ final class AudioManager: NSObject {
         queue.async { [weak self] in
             guard let self = self else { return }
             self.warmth = amount.clamped(to: 0...1)
-            // Max 25 % wet — beyond that it distorts rather than warms.
-            self.warmthUnit.wetDryMix = amount * 25
+            // 60 % max wet — clearly audible warmth without crossing into
+            // hard distortion territory on a tanpura drone.
+            self.warmthUnit.wetDryMix = amount * 60
         }
     }
 
@@ -651,8 +657,13 @@ final class AudioManager: NSObject {
         queue.async { [weak self] in
             guard let self = self else { return }
             self.compressionAmount = amount.clamped(to: 0...1)
-            let threshold  = -amount * 28        // 0 → −28 dB
-            let masterGain =  amount * 8         // up to +8 dB makeup gain
+            // Threshold sweeps 0 → −30 dB: at full slider almost everything
+            // is compressed (tanpura drone sits around −12 to −6 dBFS).
+            let threshold  = -amount * 30        // 0 → −30 dB
+            // +14 dB makeup gain at full slider — the compression squashes the
+            // peaks, the makeup gain restores loudness, making the effect
+            // unmistakably audible (punchier, more present sound).
+            let masterGain =  amount * 14
             AudioUnitSetParameter(self.compressorUnit.audioUnit,
                                   0, kAudioUnitScope_Global, 0, threshold, 0)
             AudioUnitSetParameter(self.compressorUnit.audioUnit,

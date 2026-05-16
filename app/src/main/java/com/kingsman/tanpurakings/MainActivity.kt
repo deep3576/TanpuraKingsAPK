@@ -178,8 +178,9 @@ object AudioManager {
     private var subOctaveMix:      Float = 0f
     private var warmth:            Float = 0f
     private var compressionAmount: Float = 0f
-    private val subOctavePlayers = mutableMapOf<String, MediaPlayer>()
-    private val warmthBoosts     = mutableMapOf<String, android.media.audiofx.BassBoost>()
+    private val subOctavePlayers    = mutableMapOf<String, MediaPlayer>()
+    private val warmthBoosts        = mutableMapOf<String, android.media.audiofx.BassBoost>()
+    private val loudnessEnhancers   = mutableMapOf<String, android.media.audiofx.LoudnessEnhancer>()
 
     // 3-band EQ state (gain in dB, -12..+12). Per-MediaPlayer Equalizer objects
     // are attached on creation and tracked here for cleanup.
@@ -585,14 +586,26 @@ object AudioManager {
             // Attach a per-MediaPlayer Equalizer so EQ is applied to this note.
             attachEqualizer(player, noteName)
 
-            // Warmth: BassBoost per player
+            // Warmth: BassBoost per player (full 0-1000 range for clear audibility)
             try {
                 val bb = android.media.audiofx.BassBoost(0, player.audioSessionId)
-                bb.setStrength((warmth * 700).toInt().toShort())
+                bb.setStrength((warmth * 1000).toInt().toShort())
                 bb.enabled = true
                 warmthBoosts[noteName] = bb
             } catch (t: Throwable) {
                 Log.w("AudioManager", "BassBoost attach failed: $t")
+            }
+
+            // Compressor: LoudnessEnhancer adds psychoacoustic loudness in
+            // millibels — goes beyond the 0-1 volume ceiling so compression
+            // is clearly audible (up to +9 dB at full slider).
+            try {
+                val le = android.media.audiofx.LoudnessEnhancer(player.audioSessionId)
+                le.setTargetGain((compressionAmount * 900).toInt())
+                le.enabled = compressionAmount > 0f
+                loudnessEnhancers[noteName] = le
+            } catch (t: Throwable) {
+                Log.w("AudioManager", "LoudnessEnhancer attach failed: $t")
             }
 
             // Sub-octave companion player (pitch = 0.5 = one octave down)
@@ -695,6 +708,7 @@ object AudioManager {
             runCatching { sp.stop() }; sp.release()
         }
         warmthBoosts.remove(noteName)?.runCatching { release() }
+        loudnessEnhancers.remove(noteName)?.runCatching { release() }
         val eq = equalizers.remove(noteName)
         val nv = noteVolumes.remove(noteName) ?: 1f
         val from = (currentMasterVolume * nv).coerceIn(0f, 1f)
@@ -738,6 +752,8 @@ object AudioManager {
         subOctavePlayers.clear()
         warmthBoosts.values.forEach { runCatching { it.release() } }
         warmthBoosts.clear()
+        loudnessEnhancers.values.forEach { runCatching { it.release() } }
+        loudnessEnhancers.clear()
         activePlayers.values.forEach { runCatching { it.stop() }; it.release() }
         activePlayers.clear(); noteVolumes.clear()
         updateMediaSession()
@@ -800,13 +816,14 @@ object AudioManager {
 
     fun updateCompressor(amount: Float) {
         compressionAmount = amount.coerceIn(0f, 1f)
-        // LoudnessEnhancer is used as a makeup-gain stage (API 19+).
-        // On API 28+ this could be replaced with DynamicsProcessing for true
-        // dynamic range compression — the interface is the same from the UI side.
-        activePlayers.keys.forEach { noteName ->
-            val nv  = noteVolumes[noteName] ?: 1f
-            val vol = (currentMasterVolume * nv * (1f + compressionAmount * 0.25f)).coerceIn(0f, 1f)
-            activePlayers[noteName]?.runCatching { setVolume(vol, vol) }
+        // LoudnessEnhancer adds 0–900 mB (~9 dB) of makeup gain beyond the
+        // 0–1 volume ceiling, so the effect is clearly audible.
+        val gainMb = (compressionAmount * 900).toInt()
+        loudnessEnhancers.values.forEach { le ->
+            runCatching {
+                le.setTargetGain(gainMb)
+                le.enabled = compressionAmount > 0f
+            }
         }
     }
 
@@ -995,6 +1012,8 @@ object AudioManager {
         subOctavePlayers.clear()
         warmthBoosts.values.forEach { runCatching { it.release() } }
         warmthBoosts.clear()
+        loudnessEnhancers.values.forEach { runCatching { it.release() } }
+        loudnessEnhancers.clear()
         coroutineScope?.cancel()
         coroutineScope = null
 
