@@ -90,17 +90,20 @@ final class AudioManager: NSObject {
     // Keyed by note name, value is the per-note volume (0–1).
     private var pausedSnapshot: [String: Float] = [:]
 
-    // Single shared PCM buffer loaded once from c.mp3 (Sa/C).
-    // Every note reuses this same buffer — AVAudioUnitTimePitch shifts it to
-    // the target semitone, so no per-note file is needed.
+    // Single shared PCM buffer loaded once from fsharp.mp3 (F#).
+    // F# sits at the centre of the 12-note chromatic scale, so every note is
+    // at most ±6 semitones (600 cents) away — half the maximum shift you would
+    // get using C as the base (which would need +1100 cents for B).
+    // Smaller shifts → better AVAudioUnitTimePitch quality across all notes.
     // Memory: 1 × ~150 MB instead of up to 3 × ~150 MB with the old approach.
     private var baseBuffer: AVAudioPCMBuffer?
 
-    // Semitone offset from C for each piano key name.
+    // Semitone offset FROM F# for each piano key.
     // Multiply by 100 → cents, then add fineTuneCents → AVAudioUnitTimePitch.pitch.
+    // Range: −6 (C) … +6 (C, wrapping) — worst case 6 semitones either way.
     private let semitoneOffsets: [String: Int] = [
-        "c": 0, "csharp": 1, "d": 2, "dsharp": 3, "e": 4,  "f": 5,
-        "fsharp": 6, "g": 7, "gsharp": 8, "a": 9, "asharp": 10, "b": 11
+        "c": -6, "csharp": -5, "d": -4, "dsharp": -3, "e": -2, "f": -1,
+        "fsharp": 0, "g": 1, "gsharp": 2, "a": 3, "asharp": 4, "b": 5
     ]
 
     private var fineTuneCents: Float = 0
@@ -457,15 +460,15 @@ final class AudioManager: NSObject {
         }
     }
 
-    /// Loads the single base tanpura recording (c.mp3 / Sa at C) into RAM once.
-    /// All 12 notes share this buffer; AVAudioUnitTimePitch shifts each one to
-    /// the correct semitone at play time.  One load ≈ 150 MB versus the old
-    /// lazy-per-note approach that held up to 3 × 150 MB simultaneously.
+    /// Loads the single base tanpura recording (fsharp.mp3 / F#) into RAM once.
+    /// F# is the centre of the 12-note chromatic scale, so every note needs at
+    /// most ±6 semitones of pitch shift — the minimum possible worst case.
+    /// All 12 notes share this buffer; AVAudioUnitTimePitch handles the shift.
     private func loadBaseBuffer() {
-        guard let url = Bundle.main.url(forResource: "c", withExtension: "mp3",
+        guard let url = Bundle.main.url(forResource: "fsharp", withExtension: "mp3",
                                         subdirectory: "Audio")
-                     ?? Bundle.main.url(forResource: "c", withExtension: "mp3") else {
-            print("AudioManager: c.mp3 not found — no notes will play")
+                     ?? Bundle.main.url(forResource: "fsharp", withExtension: "mp3") else {
+            print("AudioManager: fsharp.mp3 not found — no notes will play")
             return
         }
         do {
