@@ -178,8 +178,9 @@ object AudioManager {
     private var subOctaveMix:      Float = 0f
     private var warmth:            Float = 0f
     private var compressionAmount: Float = 0f
-    private val subOctavePlayers = mutableMapOf<String, MediaPlayer>()
-    private val warmthBoosts     = mutableMapOf<String, android.media.audiofx.BassBoost>()
+    private val subOctavePlayers    = mutableMapOf<String, MediaPlayer>()
+    private val warmthBoosts        = mutableMapOf<String, android.media.audiofx.BassBoost>()
+    private val loudnessEnhancers   = mutableMapOf<String, android.media.audiofx.LoudnessEnhancer>()
 
     // 3-band EQ state (gain in dB, -12..+12). Per-MediaPlayer Equalizer objects
     // are attached on creation and tracked here for cleanup.
@@ -585,14 +586,26 @@ object AudioManager {
             // Attach a per-MediaPlayer Equalizer so EQ is applied to this note.
             attachEqualizer(player, noteName)
 
-            // Warmth: BassBoost per player
+            // Warmth: BassBoost per player (full 0-1000 range for clear audibility)
             try {
                 val bb = android.media.audiofx.BassBoost(0, player.audioSessionId)
-                bb.setStrength((warmth * 700).toInt().toShort())
+                bb.setStrength((warmth * 1000).toInt().toShort())
                 bb.enabled = true
                 warmthBoosts[noteName] = bb
             } catch (t: Throwable) {
                 Log.w("AudioManager", "BassBoost attach failed: $t")
+            }
+
+            // Compressor: LoudnessEnhancer adds psychoacoustic loudness in
+            // millibels — goes beyond the 0-1 volume ceiling so compression
+            // is clearly audible (up to +9 dB at full slider).
+            try {
+                val le = android.media.audiofx.LoudnessEnhancer(player.audioSessionId)
+                le.setTargetGain((compressionAmount * 900).toInt())
+                le.enabled = compressionAmount > 0f
+                loudnessEnhancers[noteName] = le
+            } catch (t: Throwable) {
+                Log.w("AudioManager", "LoudnessEnhancer attach failed: $t")
             }
 
             // Sub-octave companion player (pitch = 0.5 = one octave down)
@@ -695,6 +708,7 @@ object AudioManager {
             runCatching { sp.stop() }; sp.release()
         }
         warmthBoosts.remove(noteName)?.runCatching { release() }
+        loudnessEnhancers.remove(noteName)?.runCatching { release() }
         val eq = equalizers.remove(noteName)
         val nv = noteVolumes.remove(noteName) ?: 1f
         val from = (currentMasterVolume * nv).coerceIn(0f, 1f)
@@ -738,10 +752,17 @@ object AudioManager {
         subOctavePlayers.clear()
         warmthBoosts.values.forEach { runCatching { it.release() } }
         warmthBoosts.clear()
+        loudnessEnhancers.values.forEach { runCatching { it.release() } }
+        loudnessEnhancers.clear()
         activePlayers.values.forEach { runCatching { it.stop() }; it.release() }
         activePlayers.clear(); noteVolumes.clear()
         updateMediaSession()
-        stopPlaybackService()
+        // Keep the foreground service (and its notification) alive when a
+        // snapshot exists — the lock-screen Play button must remain visible so
+        // the user can resume without opening the app.
+        // The service is stopped when the snapshot is consumed (onPlay) or when
+        // the user explicitly stops everything with no snapshot.
+        if (pausedNotesSnapshot.isEmpty()) stopPlaybackService()
     }
 
     fun updateEffects(
@@ -800,13 +821,14 @@ object AudioManager {
 
     fun updateCompressor(amount: Float) {
         compressionAmount = amount.coerceIn(0f, 1f)
-        // LoudnessEnhancer is used as a makeup-gain stage (API 19+).
-        // On API 28+ this could be replaced with DynamicsProcessing for true
-        // dynamic range compression — the interface is the same from the UI side.
-        activePlayers.keys.forEach { noteName ->
-            val nv  = noteVolumes[noteName] ?: 1f
-            val vol = (currentMasterVolume * nv * (1f + compressionAmount * 0.25f)).coerceIn(0f, 1f)
-            activePlayers[noteName]?.runCatching { setVolume(vol, vol) }
+        // LoudnessEnhancer adds 0–900 mB (~9 dB) of makeup gain beyond the
+        // 0–1 volume ceiling, so the effect is clearly audible.
+        val gainMb = (compressionAmount * 900).toInt()
+        loudnessEnhancers.values.forEach { le ->
+            runCatching {
+                le.setTargetGain(gainMb)
+                le.enabled = compressionAmount > 0f
+            }
         }
     }
 
@@ -883,10 +905,39 @@ object AudioManager {
             // setFlags() is deprecated — FLAG_HANDLES_MEDIA_BUTTONS and
             // FLAG_HANDLES_TRANSPORT_CONTROLS are set implicitly by setCallback().
             setCallback(object : MediaSessionCompat.Callback() {
-                /** Stop is the only command we fully support — the user must
-                 *  open the app to choose which note to start playing. */
-                override fun onStop()  { stopAllNotes() }
-                override fun onPause() { stopAllNotes() }
+                /** Pause: snapshot active notes then stop so Play can restore them. */
+                override fun onPause() {
+                    if (activePlayers.isNotEmpty()) {
+                        pausedNotesSnapshot = HashMap(noteVolumes)
+                        pausedForFocus = false
+                    }
+                    stopAllNotes()
+                }
+
+                /** Stop: same as pause for a drone — snapshot then stop. */
+                override fun onStop() {
+                    if (activePlayers.isNotEmpty()) {
+                        pausedNotesSnapshot = HashMap(noteVolumes)
+                        pausedForFocus = false
+                    }
+                    stopAllNotes()
+                }
+
+                /** Play: restore whichever notes were playing before pause/stop. */
+                override fun onPlay() {
+                    val snap = pausedNotesSnapshot.toMap()
+                    if (snap.isEmpty()) return
+                    pausedNotesSnapshot = emptyMap()
+                    pausedForFocus = false
+                    // Restart the foreground service so its notification is live
+                    // before the first note is created (avoids a gap where the
+                    // service is absent between onPlay() and playNote() launching).
+                    startPlaybackService()
+                    val master = currentMasterVolume
+                    val scope = coroutineScope ?: return
+                    scope.launch { snap.forEach { (name, nv) -> playNote(name, master, nv) } }
+                }
+
                 override fun onMediaButtonEvent(intent: Intent): Boolean {
                     // Let MediaButtonReceiver handle the routing; we rely on
                     // onStop/onPause for the actual work.
@@ -924,26 +975,36 @@ object AudioManager {
      * current set of active notes. Call this whenever notes are added or removed.
      */
     private fun updateMediaSession() {
-        val session = mediaSession ?: return
+        val session   = mediaSession ?: return
         val isPlaying = activePlayers.isNotEmpty()
-        val artist = activePlayers.keys.sorted()
-            .joinToString(" • ")
-            .ifEmpty { "Drone" }
+        val hasPause  = pausedNotesSnapshot.isNotEmpty()
+
+        // Show last-played notes even when paused so the user knows what
+        // will resume when they hit Play.
+        val artist = when {
+            isPlaying -> activePlayers.keys.sorted().joinToString(" • ")
+            hasPause  -> pausedNotesSnapshot.keys.sorted().joinToString(" • ")
+            else      -> "Drone"
+        }
+
+        // STATE_PAUSED keeps the Play button visible on the lock screen;
+        // STATE_STOPPED would hide the media widget on some OEMs.
+        val state = when {
+            isPlaying -> PlaybackStateCompat.STATE_PLAYING
+            hasPause  -> PlaybackStateCompat.STATE_PAUSED
+            else      -> PlaybackStateCompat.STATE_STOPPED
+        }
 
         session.setPlaybackState(
             PlaybackStateCompat.Builder()
                 .setActions(
                     PlaybackStateCompat.ACTION_STOP or
                     PlaybackStateCompat.ACTION_PAUSE or
+                    PlaybackStateCompat.ACTION_PLAY or
                     PlaybackStateCompat.ACTION_PLAY_PAUSE or
                     PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID
                 )
-                .setState(
-                    if (isPlaying) PlaybackStateCompat.STATE_PLAYING
-                    else           PlaybackStateCompat.STATE_STOPPED,
-                    PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN,
-                    1f
-                )
+                .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1f)
                 .build()
         )
 
@@ -995,6 +1056,8 @@ object AudioManager {
         subOctavePlayers.clear()
         warmthBoosts.values.forEach { runCatching { it.release() } }
         warmthBoosts.clear()
+        loudnessEnhancers.values.forEach { runCatching { it.release() } }
+        loudnessEnhancers.clear()
         coroutineScope?.cancel()
         coroutineScope = null
 
