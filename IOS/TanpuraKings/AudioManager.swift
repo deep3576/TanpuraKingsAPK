@@ -89,12 +89,19 @@ final class AudioManager: NSObject {
     // play button can restore the same set of notes without opening the app.
     // Keyed by note name, value is the per-note volume (0–1).
     private var pausedSnapshot: [String: Float] = [:]
-    // Only the file URL is stored at startup — the PCM buffer is loaded lazily
-    // inside playNote() the moment a note is tapped.  Keeping all 12 files
-    // decoded simultaneously blows the 3 GB process limit (each tanpura
-    // recording is ~100–200 MB as uncompressed float32 PCM; 12 × that = crash).
-    // With lazy loading at most MAX_ACTIVE_NOTES (3) buffers live at once.
-    private var audioFileURLs: [String: URL] = [:]
+
+    // Single shared PCM buffer loaded once from c.mp3 (Sa/C).
+    // Every note reuses this same buffer — AVAudioUnitTimePitch shifts it to
+    // the target semitone, so no per-note file is needed.
+    // Memory: 1 × ~150 MB instead of up to 3 × ~150 MB with the old approach.
+    private var baseBuffer: AVAudioPCMBuffer?
+
+    // Semitone offset from C for each piano key name.
+    // Multiply by 100 → cents, then add fineTuneCents → AVAudioUnitTimePitch.pitch.
+    private let semitoneOffsets: [String: Int] = [
+        "c": 0, "csharp": 1, "d": 2, "dsharp": 3, "e": 4,  "f": 5,
+        "fsharp": 6, "g": 7, "gsharp": 8, "a": 9, "asharp": 10, "b": 11
+    ]
 
     private var fineTuneCents: Float = 0
     private var reverbMix: Float = 0
@@ -114,8 +121,6 @@ final class AudioManager: NSObject {
     private let noteFadeMs: Double = 350
 
     private let queue = DispatchQueue(label: "com.kingsman.tanpurakings.audio")
-
-    private let noteKeys = ["c","csharp","d","dsharp","e","f","fsharp","g","gsharp","a","asharp","b"]
 
     private var didRegisterObservers = false
 
@@ -360,7 +365,7 @@ final class AudioManager: NSObject {
         // Metronome bypasses the effects so the click stays dry.
         engine.connect(metronomePlayer, to: mainMixer, format: processingFormat)
 
-        openAudioFiles()
+        loadBaseBuffer()
         loadMetronomeBuffer()
 
         do {
@@ -370,7 +375,7 @@ final class AudioManager: NSObject {
             registerObservers()
             startWatchdog()
             setupRemoteCommands()
-            print("AudioManager ready. Cached URLs: \(audioFileURLs.keys.sorted())")
+            print("AudioManager ready. Base buffer loaded: \(baseBuffer != nil)")
         } catch {
             print("Engine start error: \(error)")
         }
@@ -452,17 +457,30 @@ final class AudioManager: NSObject {
         }
     }
 
-    private func openAudioFiles() {
-        // Only resolve and cache the file URL — no decoding yet.
-        // The PCM buffer is loaded on demand in playNote() so we never hold
-        // more than MAX_ACTIVE_NOTES decoded buffers in RAM simultaneously.
-        for key in noteKeys {
-            guard let url = Bundle.main.url(forResource: key, withExtension: "mp3", subdirectory: "Audio")
-                ?? Bundle.main.url(forResource: key, withExtension: "mp3") else {
-                print("Missing audio resource: \(key).mp3")
-                continue
+    /// Loads the single base tanpura recording (c.mp3 / Sa at C) into RAM once.
+    /// All 12 notes share this buffer; AVAudioUnitTimePitch shifts each one to
+    /// the correct semitone at play time.  One load ≈ 150 MB versus the old
+    /// lazy-per-note approach that held up to 3 × 150 MB simultaneously.
+    private func loadBaseBuffer() {
+        guard let url = Bundle.main.url(forResource: "c", withExtension: "mp3",
+                                        subdirectory: "Audio")
+                     ?? Bundle.main.url(forResource: "c", withExtension: "mp3") else {
+            print("AudioManager: c.mp3 not found — no notes will play")
+            return
+        }
+        do {
+            let file     = try AVAudioFile(forReading: url)
+            let capacity = AVAudioFrameCount(file.length)
+            guard let buf = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
+                                             frameCapacity: capacity) else {
+                print("AudioManager: base buffer alloc failed")
+                return
             }
-            audioFileURLs[key] = url
+            try file.read(into: buf)
+            baseBuffer = buf
+            print("AudioManager: base buffer ready — \(file.processingFormat), \(file.length) frames")
+        } catch {
+            print("AudioManager: base buffer load error: \(error)")
         }
     }
 
@@ -573,44 +591,31 @@ final class AudioManager: NSObject {
             guard self.isInitialized else { return }
             guard self.activeNotes.count < MAX_ACTIVE_NOTES else { return }
             guard self.activeNotes[noteName] == nil else { return }
-            // Clear any stale lock-screen snapshot — the user is taking manual
-            // control, so the paused widget should not linger after they tap a note.
+            // Clear any stale lock-screen snapshot.
             self.pausedSnapshot = [:]
 
-            let key = self.fileKey(from: noteName)
-            guard let url = self.audioFileURLs[key] else {
-                print("No URL cached for \(key)")
-                return
-            }
-            // Load the PCM buffer now, on demand.  This is the only point where
-            // RAM for this note is allocated; it is freed automatically when
-            // ActiveNote (and thus the buffer) is deallocated on stop.
-            let buffer: AVAudioPCMBuffer
-            do {
-                let file = try AVAudioFile(forReading: url)
-                let capacity = AVAudioFrameCount(file.length)
-                guard let buf = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
-                                                 frameCapacity: capacity) else {
-                    print("Could not allocate PCM buffer for \(key)")
-                    return
-                }
-                try file.read(into: buf)
-                buffer = buf
-            } catch {
-                print("Buffer load error for \(key): \(error)")
+            // All notes share the single base buffer (c.mp3 / Sa at C).
+            // AVAudioUnitTimePitch shifts each note to its target semitone,
+            // so no per-note file load is needed — no blocking I/O here.
+            guard let buffer = self.baseBuffer else {
+                print("AudioManager: base buffer not loaded — cannot play \(noteName)")
                 return
             }
 
+            let key       = self.fileKey(from: noteName)
+            let semitones = self.semitoneOffsets[key] ?? 0
+            let pitchCents = Float(semitones * 100) + self.fineTuneCents
+
             let player = AVAudioPlayerNode()
-            let pitch = AVAudioUnitTimePitch()
-            pitch.pitch = self.fineTuneCents
+            let pitch  = AVAudioUnitTimePitch()
+            pitch.pitch = pitchCents
 
             self.engine.attach(player)
             self.engine.attach(pitch)
 
             let bufferFormat = buffer.format
-            self.engine.connect(player, to: pitch, format: bufferFormat)
-            self.engine.connect(pitch, to: self.effectsBus, format: bufferFormat)
+            self.engine.connect(player, to: pitch,           format: bufferFormat)
+            self.engine.connect(pitch,  to: self.effectsBus, format: bufferFormat)
 
             let target = max(0, min(1, masterVolume * noteVolume))
 
@@ -618,25 +623,24 @@ final class AudioManager: NSObject {
             note.targetVolume = target
             self.activeNotes[noteName] = note
 
-            // Sub-octave companion — always created, volume = 0 when blend is off.
+            // Sub-octave companion — one octave below the note pitch.
             let subPlayer = AVAudioPlayerNode()
-            let subPitch   = AVAudioUnitTimePitch()
-            subPitch.pitch = -1200 + self.fineTuneCents   // −1 octave, tracking fine tune
+            let subPitch  = AVAudioUnitTimePitch()
+            subPitch.pitch = pitchCents - 1200
             self.engine.attach(subPlayer)
             self.engine.attach(subPitch)
-            self.engine.connect(subPlayer, to: subPitch,      format: bufferFormat)
+            self.engine.connect(subPlayer, to: subPitch,        format: bufferFormat)
             self.engine.connect(subPitch,  to: self.effectsBus, format: bufferFormat)
             note.subPlayer = subPlayer
             note.subPitch  = subPitch
             let subVol = (target * self.subOctaveMix).clamped(to: 0...1)
             subPlayer.volume = subVol
-            subPlayer.scheduleBuffer(note.buffer, at: nil, options: .loops, completionHandler: nil)
+            subPlayer.scheduleBuffer(buffer, at: nil, options: .loops, completionHandler: nil)
             subPlayer.play()
 
             self.updateNowPlayingInfo()
             self.scheduleLoopingBuffer(for: note)
-            // Start silent and fade up — eliminates the click and gives a
-            // crossfade-feel when this note is replacing another.
+            // Fade in from silence to avoid click on note start.
             player.volume = 0
             player.play()
             self.fadeVolume(of: note, to: target, durationMs: self.noteFadeMs)
@@ -943,9 +947,14 @@ final class AudioManager: NSObject {
 
             if fineTune != self.fineTuneCents {
                 self.fineTuneCents = fineTune
-                for (_, note) in self.activeNotes {
-                    note.pitch.pitch = fineTune
-                    note.subPitch?.pitch = -1200 + fineTune
+                // Each note's pitch = its semitone offset (cents) + fine tune.
+                // The semitone offset is what distinguishes C from D from G etc.
+                for (noteName, note) in self.activeNotes {
+                    let key      = self.fileKey(from: noteName)
+                    let semitones = self.semitoneOffsets[key] ?? 0
+                    let pitchCents = Float(semitones * 100) + fineTune
+                    note.pitch.pitch    = pitchCents
+                    note.subPitch?.pitch = pitchCents - 1200
                 }
             }
 
@@ -1090,7 +1099,7 @@ final class AudioManager: NSObject {
             }
             self.activeNotes.removeAll()
             self.engine.stop()
-            self.audioFileURLs.removeAll()
+            self.baseBuffer = nil
             self.metronomeBuffer = nil
             self.isInitialized = false
             // Clear now-playing and remote command targets
