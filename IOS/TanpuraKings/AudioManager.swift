@@ -107,6 +107,9 @@ final class AudioManager: NSObject {
     ]
 
     private var fineTuneCents: Float = 0
+    // −1200 cents = lower octave, 0 = mid (default), +1200 = higher octave.
+    // Stacks on top of the per-note semitone offset and fine tune.
+    private var octaveShift: Float = 0
     private var reverbMix: Float = 0
     private var echoMix: Float = 0
     private var echoDelayMs: Float = 300
@@ -605,9 +608,9 @@ final class AudioManager: NSObject {
                 return
             }
 
-            let key       = self.fileKey(from: noteName)
-            let semitones = self.semitoneOffsets[key] ?? 0
-            let pitchCents = Float(semitones * 100) + self.fineTuneCents
+            let key        = self.fileKey(from: noteName)
+            let semitones  = self.semitoneOffsets[key] ?? 0
+            let pitchCents = Float(semitones * 100) + self.octaveShift + self.fineTuneCents
 
             let player = AVAudioPlayerNode()
             let pitch  = AVAudioUnitTimePitch()
@@ -730,6 +733,22 @@ final class AudioManager: NSObject {
             guard let self = self else { return }
             self.stereoWidth = max(0, min(1, width))
             self.reapplyStereoSpread()
+        }
+    }
+
+    /// Shifts all notes by one full octave up (+1), no shift (0), or down (−1).
+    /// Takes effect immediately for any currently playing notes.
+    func updateOctave(_ octave: Int) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.octaveShift = Float(octave) * 1200.0
+            for (noteName, note) in self.activeNotes where !note.isStopping {
+                let key        = self.fileKey(from: noteName)
+                let semitones  = self.semitoneOffsets[key] ?? 0
+                let pitchCents = Float(semitones * 100) + self.octaveShift + self.fineTuneCents
+                note.pitch.pitch     = pitchCents
+                note.subPitch?.pitch = pitchCents - 1200
+            }
         }
     }
 
@@ -950,13 +969,11 @@ final class AudioManager: NSObject {
 
             if fineTune != self.fineTuneCents {
                 self.fineTuneCents = fineTune
-                // Each note's pitch = its semitone offset (cents) + fine tune.
-                // The semitone offset is what distinguishes C from D from G etc.
                 for (noteName, note) in self.activeNotes {
-                    let key      = self.fileKey(from: noteName)
-                    let semitones = self.semitoneOffsets[key] ?? 0
-                    let pitchCents = Float(semitones * 100) + fineTune
-                    note.pitch.pitch    = pitchCents
+                    let key        = self.fileKey(from: noteName)
+                    let semitones  = self.semitoneOffsets[key] ?? 0
+                    let pitchCents = Float(semitones * 100) + self.octaveShift + fineTune
+                    note.pitch.pitch     = pitchCents
                     note.subPitch?.pitch = pitchCents - 1200
                 }
             }
