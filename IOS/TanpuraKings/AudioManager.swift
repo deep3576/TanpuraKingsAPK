@@ -32,16 +32,18 @@ final class AudioManager: NSObject {
     // Guaranteed non-nil after initializeIfNeeded() — falls back to a
     // programmatic sine burst if click.mp3 can't be loaded.
     private var metronomeBuffer: AVAudioPCMBuffer?
-    // DispatchSourceTimer fires on its own dedicated .userInteractive queue so
-    // large tanpura file loads on the main audio queue can never delay or drop
-    // a metronome beat.  This replaces the old asyncAfter self-rescheduling
-    // chain, which was the primary cause of missed beats when playNote() was
-    // loading a 100–200 MB PCM buffer on the same serial queue.
-    private var metronomeTimer: DispatchSourceTimer?
+    // Self-rescheduling asyncAfter chain that runs on metronomeTimerQueue —
+    // a dedicated .userInteractive serial queue that is NEVER blocked by
+    // tanpura file loading on the main audio queue.  Each link reads
+    // metronomeBPM fresh, so tempo changes take effect at the very next beat
+    // without any timer restart.
     private let metronomeTimerQueue = DispatchQueue(
         label: "com.kingsman.tanpurakings.metronome",
         qos: .userInteractive
     )
+    // Bumped on every start/stop so stale chain links become no-ops.
+    // Not bumped on BPM changes — the chain picks up the new value naturally.
+    private var metronomeGeneration: Int = 0
     private var metronomeRunning = false
     private var metronomeBPM: Float = 80
     private var metronomeVolume: Float = 0.7
@@ -257,10 +259,12 @@ final class AudioManager: NSObject {
                 }
 
                 // Also restart the metronome if it was running — engine.stop()
-                // halts all attached player nodes, so the player must be
-                // re-kicked and the timer restarted from .now().
+                // halts all attached player nodes.  Bump the generation to
+                // kill any queued beat work items, then start a fresh chain.
                 if self.metronomeRunning {
-                    self.startMetronomeTimer(immediate: true)
+                    self.metronomeGeneration += 1
+                    self.tickMetronome()
+                    self.scheduleNextBeat()
                 }
             } catch {
                 // Session still contested (common when a Bluetooth ownership
@@ -438,15 +442,13 @@ final class AudioManager: NSObject {
             }
         }
 
-        // Restart the metronome if the player went silent (engine.stop() halts
-        // all attached nodes) or the timer was lost.
-        if metronomeRunning {
-            if metronomeTimer == nil {
-                startMetronomeTimer(immediate: true)
-            } else if !metronomePlayer.isPlaying {
-                // Timer is alive but player stalled — re-prime the player.
-                tickMetronome()
-            }
+        // If the metronome should be running but the player has gone silent,
+        // restart the chain (engine.stop() during a BT route change stops all
+        // attached player nodes without firing any callback).
+        if metronomeRunning && !metronomePlayer.isPlaying {
+            metronomeGeneration += 1
+            tickMetronome()
+            scheduleNextBeat()
         }
     }
 
@@ -782,11 +784,9 @@ final class AudioManager: NSObject {
             let clamped = max(40, min(240, bpm))
             guard clamped != self.metronomeBPM else { return }
             self.metronomeBPM = clamped
-            // Reschedule the timer at the new interval; fires immediately so
-            // the tempo change is heard within one beat of lifting the finger.
-            if self.metronomeRunning {
-                self.startMetronomeTimer(immediate: false)
-            }
+            // No timer restart needed. The self-rescheduling chain reads
+            // metronomeBPM fresh on each link, so the new tempo is applied
+            // automatically at the very next beat boundary.
         }
     }
 
@@ -802,70 +802,55 @@ final class AudioManager: NSObject {
         queue.async { [weak self] in
             guard let self = self, self.isInitialized else { return }
             guard !self.metronomeRunning else { return }
-            // metronomeBuffer is guaranteed non-nil after initializeIfNeeded()
-            // (makeClickBuffer() fallback ensures it). Guard is a safety net only.
             guard self.metronomeBuffer != nil else {
-                print("AudioManager: startMetronome — buffer is nil, cannot start")
+                print("AudioManager: startMetronome — buffer nil, cannot start")
                 return
             }
             self.metronomeRunning = true
             self.metronomePlayer.volume = self.metronomeVolume
-            self.startMetronomeTimer(immediate: true)
+            self.metronomeGeneration += 1
+            // Fire the first click immediately, then start the recurring chain.
+            self.tickMetronome()
+            self.scheduleNextBeat()
         }
     }
 
-    /// Creates (or replaces) the DispatchSourceTimer that drives each beat.
+    /// Schedules the next beat on `metronomeTimerQueue` (high-priority,
+    /// separate from the audio queue) and reads `metronomeBPM` fresh so that
+    /// slider changes take effect at the very next beat with no restart.
     ///
-    /// Runs on its own `.userInteractive` queue (`metronomeTimerQueue`) so it
-    /// is never blocked by file-loading work on the main audio queue.  This
-    /// was the primary cause of the old `asyncAfter` chain missing beats when
-    /// `playNote()` was loading a 100–200 MB tanpura file.
-    ///
-    /// - Parameter immediate: `true` → fire the first click right now (use
-    ///   when starting fresh); `false` → wait one interval before the first
-    ///   click (use when restarting for a BPM change so we don't double-tick).
-    ///
-    /// Must be called on `queue`.
-    private func startMetronomeTimer(immediate: Bool) {
-        // Cancel any in-flight timer first. GCD cancel() is thread-safe and
-        // idempotent; the event handler, if currently executing, finishes
-        // naturally but checks metronomeRunning before doing work.
-        metronomeTimer?.cancel()
-        metronomeTimer = nil
+    /// Each link in the chain captures the current generation; if
+    /// `metronomeGeneration` changes (start/stop) the captured gen no longer
+    /// matches and the link silently becomes a no-op, ending the old chain.
+    private func scheduleNextBeat() {
         guard metronomeRunning else { return }
-
+        let gen        = metronomeGeneration
+        // Read BPM fresh every beat — this is the key that makes slider changes
+        // take effect automatically without any timer restart.
         let intervalNs = max(1, Int(60_000_000_000 / Double(metronomeBPM)))
-        let timer = DispatchSource.makeTimerSource(queue: metronomeTimerQueue)
-        let start: DispatchTime = immediate ? .now() : (.now() + .nanoseconds(intervalNs))
-        // leeway 5 ms: tight enough for music, small enough to not burn battery.
-        timer.schedule(deadline: start,
-                       repeating: .nanoseconds(intervalNs),
-                       leeway: .milliseconds(5))
-        timer.setEventHandler { [weak self] in
-            // tickMetronome uses only thread-safe AVAudioPlayerNode APIs
-            // (scheduleBuffer, isPlaying, play) — safe to call from any queue.
-            guard let self = self, self.metronomeRunning else { return }
+
+        metronomeTimerQueue.asyncAfter(deadline: .now() + .nanoseconds(intervalNs)) {
+            [weak self] in
+            guard let self = self, self.metronomeGeneration == gen else { return }
             self.tickMetronome()
+            self.scheduleNextBeat()   // recurse with fresh BPM
         }
-        timer.resume()
-        metronomeTimer = timer
     }
 
     func stopMetronome() {
         queue.async { [weak self] in
             guard let self = self else { return }
-            // Set flag first so any in-flight timer event handler bails out
-            // before calling tickMetronome() after the player is stopped.
+            // Bump generation first — any queued beat work item that fires
+            // after this will see a stale gen and become a silent no-op.
+            self.metronomeGeneration += 1
             self.metronomeRunning = false
-            self.metronomeTimer?.cancel()
-            self.metronomeTimer = nil
             self.metronomePlayer.stop()
         }
     }
 
     /// Schedules one click buffer and ensures the player is running.
-    /// All APIs used here (scheduleBuffer, isPlaying, play) are documented as
-    /// thread-safe on AVAudioPlayerNode and may be called from any thread.
+    /// Uses only thread-safe AVAudioPlayerNode APIs — safe to call from any
+    /// queue, including metronomeTimerQueue.
     private func tickMetronome() {
         guard let buf = metronomeBuffer else { return }
         // Critical order: scheduleBuffer BEFORE play().
@@ -1095,9 +1080,10 @@ final class AudioManager: NSObject {
             guard let self = self else { return }
             self.watchdog?.cancel()
             self.watchdog = nil
-            self.metronomeRunning = false   // stop flag before cancel so handler bails
-            self.metronomeTimer?.cancel()
-            self.metronomeTimer = nil
+            // Bump generation before clearing running flag so any queued beat
+            // work item that fires during teardown sees a stale gen and bails.
+            self.metronomeGeneration += 1
+            self.metronomeRunning = false
             self.metronomePlayer.stop()
             for (_, note) in self.activeNotes {
                 self.teardown(note)
