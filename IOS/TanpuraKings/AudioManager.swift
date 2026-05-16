@@ -25,7 +25,11 @@ final class AudioManager: NSObject {
     // Metronome runs on its own player on a separate branch into the main
     // mixer, so it bypasses the reverb/delay/echo chain.
     private let metronomePlayer = AVAudioPlayerNode()
-    private var metronomeFile: AVAudioFile?
+    // Immutable PCM buffer loaded once at startup. Using a buffer instead of
+    // a shared AVAudioFile eliminates the data race where file.framePosition=0
+    // was called while the engine render thread was still reading from the same
+    // file object, silently dropping or corrupting clicks.
+    private var metronomeBuffer: AVAudioPCMBuffer?
     // Each beat schedules the next via a DispatchWorkItem so the current BPM
     // is always read fresh — no timer restart needed when the slider changes.
     private var metronomeWorkItem: DispatchWorkItem?
@@ -254,9 +258,10 @@ final class AudioManager: NSObject {
                 // Also restart the metronome if it was running — its player
                 // is stopped by engine.stop() and must be explicitly resumed.
                 if self.metronomeRunning {
-                    if !self.metronomePlayer.isPlaying { self.metronomePlayer.play() }
-                    // Bump generation + reschedule so the old chain is replaced.
+                    // tickMetronome schedules the buffer THEN calls play(),
+                    // which is the required order for AVAudioPlayerNode.
                     self.metronomeGeneration += 1
+                    self.tickMetronome()
                     self.scheduleNextBeat()
                 }
             } catch {
@@ -354,7 +359,7 @@ final class AudioManager: NSObject {
         engine.connect(metronomePlayer, to: mainMixer, format: processingFormat)
 
         openAudioFiles()
-        openMetronomeFile()
+        loadMetronomeBuffer()
 
         do {
             engine.prepare()
@@ -438,8 +443,8 @@ final class AudioManager: NSObject {
         // Restart the metronome beat chain if it was silenced by an engine
         // restart (engine.stop() halts all attached player nodes).
         if metronomeRunning && !metronomePlayer.isPlaying {
-            metronomePlayer.play()
             metronomeGeneration += 1
+            tickMetronome()       // schedule buffer first, then play()
             scheduleNextBeat()
         }
     }
@@ -458,13 +463,52 @@ final class AudioManager: NSObject {
         }
     }
 
-    private func openMetronomeFile() {
+    private func loadMetronomeBuffer() {
         guard let url = Bundle.main.url(forResource: "click", withExtension: "mp3", subdirectory: "Audio")
             ?? Bundle.main.url(forResource: "click", withExtension: "mp3") else {
-            print("Missing click.mp3")
+            print("AudioManager: Missing click.mp3 — metronome will be silent")
             return
         }
-        metronomeFile = try? AVAudioFile(forReading: url)
+        do {
+            let file      = try AVAudioFile(forReading: url)
+            let srcFmt    = file.processingFormat
+            let srcFrames = AVAudioFrameCount(file.length)
+
+            // Read the click into native-format samples first.
+            guard let srcBuf = AVAudioPCMBuffer(pcmFormat: srcFmt, frameCapacity: srcFrames) else { return }
+            try file.read(into: srcBuf)
+
+            // The metronomePlayer is connected at processingFormat (44100 Hz, 2ch,
+            // float32). scheduleBuffer requires the buffer to match that format, so
+            // convert if the file is mono or has a different sample rate.
+            if srcFmt == processingFormat {
+                metronomeBuffer = srcBuf
+            } else {
+                guard let converter = AVAudioConverter(from: srcFmt, to: processingFormat) else {
+                    print("AudioManager: Cannot convert click.mp3 to engine format")
+                    return
+                }
+                let ratio     = processingFormat.sampleRate / srcFmt.sampleRate
+                let dstFrames = AVAudioFrameCount(Double(srcFrames) * ratio) + 1
+                guard let dstBuf = AVAudioPCMBuffer(pcmFormat: processingFormat,
+                                                    frameCapacity: dstFrames) else { return }
+                var inputGiven = false
+                let status = converter.convert(to: dstBuf, error: nil) { _, outStatus in
+                    guard !inputGiven else { outStatus.pointee = .endOfStream; return nil }
+                    inputGiven = true
+                    outStatus.pointee = .haveData
+                    return srcBuf
+                }
+                if status != .error {
+                    metronomeBuffer = dstBuf
+                } else {
+                    print("AudioManager: AVAudioConverter failed for click.mp3")
+                }
+            }
+            print("AudioManager: Metronome buffer ready — \(srcFmt) → \(processingFormat)")
+        } catch {
+            print("AudioManager: Metronome buffer load error: \(error)")
+        }
     }
 
     private func fileKey(from noteName: String) -> String {
@@ -727,11 +771,10 @@ final class AudioManager: NSObject {
 
     func startMetronome() {
         queue.async { [weak self] in
-            guard let self = self, self.isInitialized, self.metronomeFile != nil else { return }
+            guard let self = self, self.isInitialized, self.metronomeBuffer != nil else { return }
             guard !self.metronomeRunning else { return }
             self.metronomeRunning = true
             self.metronomePlayer.volume = self.metronomeVolume
-            if !self.metronomePlayer.isPlaying { self.metronomePlayer.play() }
             // Bump generation to invalidate any lingering work item from a
             // previous run, then fire the first click immediately.
             self.metronomeGeneration += 1
@@ -779,12 +822,15 @@ final class AudioManager: NSObject {
     }
 
     private func tickMetronome() {
-        guard let file = metronomeFile else { return }
-        if !metronomePlayer.isPlaying {
-            metronomePlayer.play()
-        }
-        file.framePosition = 0
-        metronomePlayer.scheduleFile(file, at: nil)
+        guard let buf = metronomeBuffer else { return }
+        // Critical order: schedule BEFORE play().
+        // If play() is called first on an idle player, it starts rendering
+        // silence and the scheduled buffer arrives too late — the first
+        // milliseconds of the click are silently dropped, causing a dead beat.
+        // Scheduling first guarantees the buffer is in the queue the instant
+        // the player node starts producing output.
+        metronomePlayer.scheduleBuffer(buf, at: nil, options: [], completionHandler: nil)
+        if !metronomePlayer.isPlaying { metronomePlayer.play() }
     }
 
     func stopNote(_ noteName: String) {
@@ -1019,7 +1065,7 @@ final class AudioManager: NSObject {
             self.activeNotes.removeAll()
             self.engine.stop()
             self.audioFileURLs.removeAll()
-            self.metronomeFile = nil
+            self.metronomeBuffer = nil
             self.isInitialized = false
             // Clear now-playing and remote command targets
             DispatchQueue.main.async {
