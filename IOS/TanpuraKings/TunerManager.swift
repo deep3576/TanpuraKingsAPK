@@ -69,7 +69,7 @@ final class TunerManager: ObservableObject {
             try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true)
         } catch {
-            print("Tuner: restore session error: \(error)")
+            debugLog("Tuner: restore session error: \(error)")
         }
     }
 
@@ -83,7 +83,7 @@ final class TunerManager: ObservableObject {
             )
             try session.setActive(true)
         } catch {
-            print("Tuner: session error: \(error)")
+            debugLog("Tuner: session error: \(error)")
             return
         }
 
@@ -103,7 +103,7 @@ final class TunerManager: ObservableObject {
             try inputEngine.start()
             isListening = true
         } catch {
-            print("Tuner: engine start error: \(error)")
+            debugLog("Tuner: engine start error: \(error)")
         }
     }
 

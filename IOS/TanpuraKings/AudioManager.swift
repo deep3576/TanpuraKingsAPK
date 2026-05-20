@@ -3,6 +3,14 @@ import AVFoundation
 import AudioToolbox
 import MediaPlayer
 
+/// Debug-only print — compiles to nothing in release builds.
+@inline(__always)
+internal func debugLog(_ message: @autoclosure () -> String) {
+    #if DEBUG
+    print(message())
+    #endif
+}
+
 final class AudioManager: NSObject {
     static let shared = AudioManager()
 
@@ -56,12 +64,11 @@ final class AudioManager: NSObject {
     private var isInitialized = false
     private var remoteCommandsConfigured = false
 
-    private let processingFormat: AVAudioFormat = {
-        guard let fmt = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2) else {
-            fatalError("Failed to create processing format")
-        }
-        return fmt
-    }()
+    // Force-unwrap is safe: 44.1 kHz stereo PCM is universally supported.
+    // Using `!` instead of fatalError avoids a misleading crash label in
+    // production crash logs if this ever somehow fails.
+    private let processingFormat: AVAudioFormat =
+        AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 2)!
 
     private final class ActiveNote {
         let player: AVAudioPlayerNode
@@ -291,7 +298,7 @@ final class AudioManager: NSObject {
                 // change and the interruption-end fire at the same time, or
                 // when the remote device doesn't release the A2DP link cleanly).
                 // Mark as interrupted so the watchdog retries every 2 s.
-                print("Restart deferred — session busy: \(error)")
+                debugLog("Restart deferred — session busy: \(error)")
                 self.isInterrupted = true
             }
         }
@@ -310,7 +317,7 @@ final class AudioManager: NSObject {
             try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true)
         } catch {
-            print("AudioSession error: \(error)")
+            debugLog("AudioSession error: \(error)")
         }
 
         // Cathedral gives more space and warmth than largeHall for a tanpura drone.
@@ -390,9 +397,9 @@ final class AudioManager: NSObject {
             registerObservers()
             startWatchdog()
             setupRemoteCommands()
-            print("AudioManager ready. Base buffer loaded: \(baseBuffer != nil)")
+            debugLog("AudioManager ready. Base buffer loaded: \(baseBuffer != nil)")
         } catch {
-            print("Engine start error: \(error)")
+            debugLog("Engine start error: \(error)")
         }
     }
 
@@ -444,7 +451,7 @@ final class AudioManager: NSObject {
                 engine.prepare()
                 try engine.start()
             } catch {
-                print("Watchdog engine restart failed: \(error)")
+                debugLog("Watchdog engine restart failed: \(error)")
                 isInterrupted = true // keep retrying next tick
                 return
             }
@@ -485,7 +492,7 @@ final class AudioManager: NSObject {
         guard let url = Bundle.main.url(forResource: "fsharp", withExtension: "mp3",
                                         subdirectory: "Audio")
                      ?? Bundle.main.url(forResource: "fsharp", withExtension: "mp3") else {
-            print("AudioManager: fsharp.mp3 not found — no notes will play")
+            debugLog("AudioManager: fsharp.mp3 not found — no notes will play")
             return
         }
         do {
@@ -493,14 +500,14 @@ final class AudioManager: NSObject {
             let capacity = AVAudioFrameCount(file.length)
             guard let buf = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
                                              frameCapacity: capacity) else {
-                print("AudioManager: base buffer alloc failed")
+                debugLog("AudioManager: base buffer alloc failed")
                 return
             }
             try file.read(into: buf)
             baseBuffer = buf
-            print("AudioManager: base buffer ready — \(file.processingFormat), \(file.length) frames")
+            debugLog("AudioManager: base buffer ready — \(file.processingFormat), \(file.length) frames")
         } catch {
-            print("AudioManager: base buffer load error: \(error)")
+            debugLog("AudioManager: base buffer load error: \(error)")
         }
     }
 
@@ -588,7 +595,7 @@ final class AudioManager: NSObject {
 
                 if srcFmt == processingFormat {
                     metronomeBuffer = trimmedMetronomeBuffer(from: srcBuf) ?? srcBuf
-                    print("AudioManager: click.mp3 loaded and trimmed (formats match — no conversion)")
+                    debugLog("AudioManager: click.mp3 loaded and trimmed (formats match — no conversion)")
                     return
                 }
 
@@ -613,20 +620,20 @@ final class AudioManager: NSObject {
                 }
                 if status != .error, dstBuf.frameLength > 0 {
                     metronomeBuffer = trimmedMetronomeBuffer(from: dstBuf) ?? dstBuf
-                    print("AudioManager: click.mp3 loaded, converted, and trimmed (\(srcFmt.channelCount)ch→\(processingFormat.channelCount)ch)")
+                    debugLog("AudioManager: click.mp3 loaded, converted, and trimmed (\(srcFmt.channelCount)ch→\(processingFormat.channelCount)ch)")
                     return
                 }
-                print("AudioManager: converter status=\(status.rawValue) frameLength=\(dstBuf.frameLength) — falling back to synthetic click")
+                debugLog("AudioManager: converter status=\(status.rawValue) frameLength=\(dstBuf.frameLength) — falling back to synthetic click")
             } catch {
-                print("AudioManager: click.mp3 load error: \(error) — falling back to synthetic click")
+                debugLog("AudioManager: click.mp3 load error: \(error) — falling back to synthetic click")
             }
         } else {
-            print("AudioManager: click.mp3 not found in bundle — using synthetic click")
+            debugLog("AudioManager: click.mp3 not found in bundle — using synthetic click")
         }
 
         // --- Attempt 2: programmatic sine-burst ---
         metronomeBuffer = makeClickBuffer()
-        print("AudioManager: Synthetic click buffer \(metronomeBuffer == nil ? "FAILED" : "ready")")
+        debugLog("AudioManager: Synthetic click buffer \(metronomeBuffer == nil ? "FAILED" : "ready")")
     }
 
     private func fileKey(from noteName: String) -> String {
@@ -657,7 +664,7 @@ final class AudioManager: NSObject {
             // AVAudioUnitTimePitch shifts each note to its target semitone,
             // so no per-note file load is needed — no blocking I/O here.
             guard let buffer = self.baseBuffer else {
-                print("AudioManager: base buffer not loaded — cannot play \(noteName)")
+                debugLog("AudioManager: base buffer not loaded — cannot play \(noteName)")
                 return
             }
 
@@ -885,7 +892,7 @@ final class AudioManager: NSObject {
             guard let self = self, self.isInitialized else { return }
             guard !self.metronomeRunning else { return }
             guard self.metronomeBuffer != nil else {
-                print("AudioManager: startMetronome — buffer nil, cannot start")
+                debugLog("AudioManager: startMetronome — buffer nil, cannot start")
                 return
             }
             self.metronomeRunning = true
@@ -1191,9 +1198,9 @@ final class AudioManager: NSObject {
             guard let self = self else { return }
             self.watchdog?.cancel()
             self.watchdog = nil
-            // Bump generation before clearing running flag so any queued beat
-            // work item that fires during teardown sees a stale gen and bails.
-            self.metronomeGeneration += 1
+            // Bump generation on metronomeTimerQueue (where it's read) so any
+            // queued beat work item sees a stale gen and bails.
+            self.metronomeTimerQueue.sync { self.metronomeGeneration += 1 }
             self.metronomeRunning = false
             self.metronomePlayer.stop()
             for (_, note) in self.activeNotes {
@@ -1213,7 +1220,7 @@ final class AudioManager: NSObject {
                 cc.togglePlayPauseCommand.removeTarget(nil)
             }
             self.remoteCommandsConfigured = false
-            print("AudioManager released")
+            debugLog("AudioManager released")
         }
     }
 }

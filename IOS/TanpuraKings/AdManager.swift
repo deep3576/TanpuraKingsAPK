@@ -36,7 +36,7 @@ final class InterstitialAdManager: ObservableObject {
             request: Request()
         ) { [weak self] ad, error in
             if let error = error {
-                print("Interstitial failed to load: \(error.localizedDescription)")
+                debugLog("Interstitial failed to load: \(error.localizedDescription)")
                 return
             }
             self?.interstitialAd = ad
