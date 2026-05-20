@@ -2013,7 +2013,6 @@ private fun TunerDial(
 // ------------------------------
 // TunerScreen
 // ------------------------------
-@SuppressLint("MissingPermission")
 @Composable
 fun TunerScreen() {
     val noteName     by TunerManager.noteName.collectAsState()
@@ -2024,7 +2023,10 @@ fun TunerScreen() {
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) @androidx.annotation.RequiresPermission(android.Manifest.permission.RECORD_AUDIO) { granted -> if (granted) TunerManager.start() }
+    ) { granted ->
+        @SuppressLint("MissingPermission")  // Permission just granted above
+        if (granted) TunerManager.start()
+    }
 
     LaunchedEffect(Unit) { launcher.launch(Manifest.permission.RECORD_AUDIO) }
 

@@ -19,3 +19,11 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# --- Google AdMob ---
+-keep class com.google.android.gms.ads.** { *; }
+-keep class com.google.ads.** { *; }
+
+# --- MediaBrowserService (Android Auto / Bluetooth) ---
+-keep class com.kingsman.tanpurakings.TanpuraMediaBrowserService { *; }
+-keep class com.kingsman.tanpurakings.AudioPlaybackService { *; }

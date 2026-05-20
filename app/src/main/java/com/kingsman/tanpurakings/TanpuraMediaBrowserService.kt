@@ -50,13 +50,22 @@ class TanpuraMediaBrowserService : MediaBrowserServiceCompat() {
     // Content hierarchy
     // -------------------------------------------------------------------------
 
+    /** Known trusted clients allowed to browse and control playback. */
+    private val allowedClients = setOf(
+        "com.google.android.projection.genie",   // Android Auto
+        "com.google.android.autosimulator",       // AA desktop head unit
+        "com.android.bluetooth",                  // Bluetooth media browser
+        "com.google.android.googlequicksearchbox",// Google Assistant
+        packageName                               // This app itself
+    )
+
     override fun onGetRoot(
         clientPackageName: String,
         clientUid: Int,
         rootHints: Bundle?
-    ): BrowserRoot {
-        // Grant browsing access to all clients.
-        // For production you may whitelist known Android Auto package names.
+    ): BrowserRoot? {
+        // Only allow known trusted clients to browse media.
+        if (clientPackageName !in allowedClients) return null
         return BrowserRoot(MEDIA_ROOT_ID, null)
     }
 

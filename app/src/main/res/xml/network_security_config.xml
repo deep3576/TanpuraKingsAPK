@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Block cleartext (HTTP) traffic app-wide. Only HTTPS is allowed.
+         The AdMob SDK already uses HTTPS exclusively. -->
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>
