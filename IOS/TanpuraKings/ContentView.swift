@@ -39,37 +39,41 @@ struct ContentView: View {
     @AppStorage("selectedOctave") private var selectedOctave: Int = 0
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            DroneView(
-                activeNotes: $activeNotes,
-                activeNoteVolumes: $activeNoteVolumes,
-                masterVolume: $masterVolume,
-                reverb: $reverb,
-                fineTune: $fineTune,
-                echoMix: $echoMix,
-                echoDelay: $echoDelay,
-                subOctaveMix: $subOctaveMix,
-                warmth: $warmth,
-                compressionAmount: $compressionAmount,
-                eqLow: $eqLow,
-                eqMid: $eqMid,
-                eqHigh: $eqHigh,
-                stereoWidth: $stereoWidth,
-                metronomeOn: $metronomeOn,
-                metronomeBPM: $metronomeBPM,
-                metronomeVolume: $metronomeVolume,
-                selectedOctave: $selectedOctave
-            )
-            .tabItem {
-                Label("Drone", systemImage: "music.note")
-            }
-            .tag(AppTab.drone)
-
-            TunerView()
+        VStack(spacing: 0) {
+            TabView(selection: $selectedTab) {
+                DroneView(
+                    activeNotes: $activeNotes,
+                    activeNoteVolumes: $activeNoteVolumes,
+                    masterVolume: $masterVolume,
+                    reverb: $reverb,
+                    fineTune: $fineTune,
+                    echoMix: $echoMix,
+                    echoDelay: $echoDelay,
+                    subOctaveMix: $subOctaveMix,
+                    warmth: $warmth,
+                    compressionAmount: $compressionAmount,
+                    eqLow: $eqLow,
+                    eqMid: $eqMid,
+                    eqHigh: $eqHigh,
+                    stereoWidth: $stereoWidth,
+                    metronomeOn: $metronomeOn,
+                    metronomeBPM: $metronomeBPM,
+                    metronomeVolume: $metronomeVolume,
+                    selectedOctave: $selectedOctave
+                )
                 .tabItem {
-                    Label("Tuner", systemImage: "tuningfork")
+                    Label("Drone", systemImage: "music.note")
                 }
-                .tag(AppTab.tuner)
+                .tag(AppTab.drone)
+
+                TunerView()
+                    .tabItem {
+                        Label("Tuner", systemImage: "tuningfork")
+                    }
+                    .tag(AppTab.tuner)
+            }
+            BannerAdView()
+                .frame(height: 50)
         }
         .onAppear {
             AudioManager.shared.initializeIfNeeded()
@@ -89,6 +93,7 @@ struct ContentView: View {
                 TunerManager.shared.start()
             case .drone:
                 TunerManager.shared.stop()
+                InterstitialAdManager.shared.showIfReady()
             }
         }
     }
