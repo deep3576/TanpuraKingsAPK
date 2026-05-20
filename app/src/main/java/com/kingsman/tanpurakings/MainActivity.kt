@@ -1,5 +1,6 @@
 package com.kingsman.tanpurakings
 
+import android.app.Activity
 import android.content.Context
 import android.graphics.Paint as NativePaint
 import android.graphics.Typeface
@@ -25,6 +26,15 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Switch
 import android.provider.Settings
 import android.util.Log
+import androidx.compose.ui.viewinterop.AndroidView
+import com.google.android.gms.ads.AdRequest
+import com.google.android.gms.ads.AdSize
+import com.google.android.gms.ads.AdView
+import com.google.android.gms.ads.MobileAds
+import com.google.android.gms.ads.LoadAdError
+import com.google.android.gms.ads.interstitial.InterstitialAd
+import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback
+import com.google.android.gms.ads.FullScreenContentCallback
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
@@ -2309,6 +2319,76 @@ private fun TunerHistoryGraph(history: List<Float>, modifier: Modifier = Modifie
 }
 
 // ------------------------------
+// AdMob — Interstitial Ad Manager
+// ------------------------------
+object InterstitialAdManager {
+    private var interstitialAd: InterstitialAd? = null
+    private var lastShowTime: Long = 0L
+    private const val MIN_INTERVAL_MS = 180_000L // 3 minutes between interstitials
+
+    fun load(context: Context) {
+        if (interstitialAd != null) return
+        val adRequest = AdRequest.Builder().build()
+        InterstitialAd.load(
+            context,
+            "ca-app-pub-3492509358962490/9258488049",
+            adRequest,
+            object : InterstitialAdLoadCallback() {
+                override fun onAdLoaded(ad: InterstitialAd) {
+                    interstitialAd = ad
+                }
+                override fun onAdFailedToLoad(error: LoadAdError) {
+                    interstitialAd = null
+                }
+            }
+        )
+    }
+
+    fun showIfReady(activity: Activity, onDismissed: () -> Unit = {}) {
+        val now = System.currentTimeMillis()
+        if (now - lastShowTime < MIN_INTERVAL_MS) { onDismissed(); return }
+        val ad = interstitialAd
+        if (ad != null) {
+            ad.fullScreenContentCallback = object : FullScreenContentCallback() {
+                override fun onAdDismissedFullScreenContent() {
+                    interstitialAd = null
+                    lastShowTime = System.currentTimeMillis()
+                    onDismissed()
+                    // Pre-load next
+                    load(activity)
+                }
+                override fun onAdFailedToShowFullScreenContent(error: com.google.android.gms.ads.AdError) {
+                    interstitialAd = null
+                    onDismissed()
+                    load(activity)
+                }
+            }
+            ad.show(activity)
+        } else {
+            onDismissed()
+            load(activity)
+        }
+    }
+}
+
+// ------------------------------
+// AdMob — Banner Ad Composable
+// ------------------------------
+@Composable
+fun BannerAdView(modifier: Modifier = Modifier) {
+    AndroidView(
+        modifier = modifier.fillMaxWidth(),
+        factory = { ctx ->
+            AdView(ctx).apply {
+                setAdSize(AdSize.BANNER)
+                adUnitId = "ca-app-pub-3492509358962490/2717130426"
+                loadAd(AdRequest.Builder().build())
+            }
+        }
+    )
+}
+
+// ------------------------------
 // TanpuraKingsApp
 // ------------------------------
 @Composable
@@ -2346,6 +2426,11 @@ fun TanpuraKingsApp() {
         // Restore persisted octave into the audio engine on every launch.
         AudioManager.updateOctave(selectedOctave.intValue)
         onDispose { AudioManager.release() }
+    }
+
+    // Pre-load the first interstitial ad
+    LaunchedEffect(Unit) {
+        InterstitialAdManager.load(context)
     }
 
     LaunchedEffect(masterVolume.floatValue) {
@@ -2400,26 +2485,35 @@ fun TanpuraKingsApp() {
                 activeNotes.value      = emptySet()
                 activeNoteVolumes.value = emptyMap()
             }
-            0 -> TunerManager.stop()   // switched back to Drone — stop mic
+            0 -> {
+                TunerManager.stop()   // switched back to Drone — stop mic
+                val activity = context as? Activity
+                if (activity != null) {
+                    InterstitialAdManager.showIfReady(activity)
+                }
+            }
         }
     }
 
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
-            NavigationBar(containerColor = Color.Black.copy(alpha = 0.85f)) {
-                NavigationBarItem(
-                    selected = selectedTab == 0,
-                    onClick  = { selectedTab = 0 },
-                    icon     = { Text("♪", fontSize = 22.sp, color = if (selectedTab == 0) Color(0xFFFFA500) else Color(0xFF888888)) },
-                    label    = { Text("Drone", color = if (selectedTab == 0) Color(0xFFFFA500) else Color(0xFF888888)) }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 1,
-                    onClick  = { selectedTab = 1 },
-                    icon     = { Text("🎤", fontSize = 18.sp) },
-                    label    = { Text("Tuner", color = if (selectedTab == 1) Color(0xFFFFA500) else Color(0xFF888888)) }
-                )
+            Column {
+                BannerAdView()
+                NavigationBar(containerColor = Color.Black.copy(alpha = 0.85f)) {
+                    NavigationBarItem(
+                        selected = selectedTab == 0,
+                        onClick  = { selectedTab = 0 },
+                        icon     = { Text("♪", fontSize = 22.sp, color = if (selectedTab == 0) Color(0xFFFFA500) else Color(0xFF888888)) },
+                        label    = { Text("Drone", color = if (selectedTab == 0) Color(0xFFFFA500) else Color(0xFF888888)) }
+                    )
+                    NavigationBarItem(
+                        selected = selectedTab == 1,
+                        onClick  = { selectedTab = 1 },
+                        icon     = { Text("🎤", fontSize = 18.sp) },
+                        label    = { Text("Tuner", color = if (selectedTab == 1) Color(0xFFFFA500) else Color(0xFF888888)) }
+                    )
+                }
             }
         }
     ) { innerPadding ->
@@ -2588,6 +2682,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        MobileAds.initialize(this) {}
         setContent { TanpuraKingsApp() }
     }
 }

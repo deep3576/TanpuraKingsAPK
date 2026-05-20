@@ -22,6 +22,15 @@
 	<string>1</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Tanpura Kings uses the microphone for the built-in chromatic tuner to detect the pitch you sing or play. Audio is processed only on this device — nothing is recorded or sent anywhere.</string>
+	<key>GADApplicationIdentifier</key>
+	<string>ca-app-pub-3492509358962490~2613188644</string>
+	<key>SKAdNetworkItems</key>
+	<array>
+		<dict>
+			<key>SKAdNetworkIdentifier</key>
+			<string>cstr6suwn9.skadnetwork</string>
+		</dict>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
