@@ -985,8 +985,12 @@ final class AudioManager: NSObject {
             if !self.activeNotes.isEmpty {
                 self.pausedSnapshot = self.activeNotes.mapValues { $0.volume }
             }
+            // Use fadeAndTeardown (not immediate teardown) to avoid an audible
+            // click/pop when Stop is triggered from the lock screen or tab switch.
+            // Use a shorter fade (150 ms) so the stop feels responsive.
             for (_, note) in self.activeNotes {
-                self.teardown(note)
+                note.isStopping = true
+                self.fadeAndTeardown(note, durationMs: 150)
             }
             self.activeNotes.removeAll()
             self.updateNowPlayingInfo()

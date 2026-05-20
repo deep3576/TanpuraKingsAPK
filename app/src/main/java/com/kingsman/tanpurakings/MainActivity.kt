@@ -810,9 +810,20 @@ object AudioManager {
         if (fineTune != fineTuneCents) {
             fineTuneCents = fineTune
             // Each note has its own pitch (semitone + octave + fine-tune) — update individually.
+            // Must re-pitch ALL player types: main drone, sub-octave, and echo copies.
             activePlayers.forEach { (noteName, player) ->
                 val pitch = pitchRate(noteName)
                 runCatching { player.playbackParams = PlaybackParams().setSpeed(1.0f).setPitch(pitch) }
+            }
+            subOctavePlayers.forEach { (noteName, sp) ->
+                val pitch = pitchRate(noteName) * 0.5f
+                runCatching { sp.playbackParams = PlaybackParams().setSpeed(1.0f).setPitch(pitch) }
+            }
+            effectPlayers.forEach { (noteName, epList) ->
+                val pitch = pitchRate(noteName)
+                epList.forEach { ep ->
+                    runCatching { ep.playbackParams = PlaybackParams().setSpeed(1.0f).setPitch(pitch) }
+                }
             }
         }
 
