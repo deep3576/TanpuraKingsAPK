@@ -4,18 +4,56 @@ import GoogleMobileAds
 // MARK: - Banner Ad
 
 struct BannerAdView: UIViewRepresentable {
-    func makeUIView(context: Context) -> BannerView {
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UIView {
+        let container = UIView()
+        container.backgroundColor = .clear
+
         let banner = BannerView(adSize: AdSizeBanner)
         banner.adUnitID = "ca-app-pub-3492509358962490/6841346333"
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let rootVC = windowScene.windows.first?.rootViewController {
-            banner.rootViewController = rootVC
-        }
-        banner.load(Request())
-        return banner
+        banner.delegate = context.coordinator
+        banner.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(banner)
+
+        NSLayoutConstraint.activate([
+            banner.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            banner.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+
+        // Store the banner so updateUIView can set rootViewController
+        // once the view is actually in the window hierarchy.
+        context.coordinator.banner = banner
+        return container
     }
 
-    func updateUIView(_ uiView: BannerView, context: Context) {}
+    func updateUIView(_ uiView: UIView, context: Context) {
+        guard let banner = context.coordinator.banner else { return }
+        // rootViewController is only available once the view is in a window.
+        if banner.rootViewController == nil,
+           let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = windowScene.windows.first?.rootViewController {
+            banner.rootViewController = rootVC
+            banner.load(Request())
+        }
+    }
+
+    final class Coordinator: NSObject, BannerViewDelegate {
+        var banner: BannerView?
+
+        func bannerViewDidReceiveAd(_ bannerView: BannerView) {
+            debugLog("Banner ad loaded successfully")
+        }
+
+        func bannerView(_ bannerView: BannerView, didFailToReceiveAdWithError error: Error) {
+            debugLog("Banner ad failed: \(error.localizedDescription)")
+            // Retry after 30 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak bannerView] in
+                bannerView?.load(Request())
+            }
+        }
+    }
 }
 
 // MARK: - Interstitial Ad
@@ -31,15 +69,22 @@ final class InterstitialAdManager: ObservableObject {
     private init() {}
 
     func load() {
+        // Don't reload if we already have one ready
+        guard interstitialAd == nil else { return }
         InterstitialAd.load(
             with: "ca-app-pub-3492509358962490/4402885253",
             request: Request()
         ) { [weak self] ad, error in
             if let error = error {
                 debugLog("Interstitial failed to load: \(error.localizedDescription)")
+                // Retry after 60 seconds
+                DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
+                    self?.load()
+                }
                 return
             }
             self?.interstitialAd = ad
+            debugLog("Interstitial ad loaded successfully")
         }
     }
 
