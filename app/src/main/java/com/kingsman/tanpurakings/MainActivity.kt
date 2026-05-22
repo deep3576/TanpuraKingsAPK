@@ -2571,14 +2571,9 @@ fun TanpuraKingsApp() {
             }
             0 -> {
                 TunerManager.stop()   // switched back to Drone — stop mic
-                // Only show interstitial when no drone is playing — never
-                // interrupt an active practice session with an ad.
-                if (!AudioManager.isPlaying) {
-                    val activity = context as? Activity
-                    if (activity != null) {
-                        InterstitialAdManager.showIfReady(activity)
-                    }
-                }
+                // Do not show interstitial ads during musical workflow.
+                // Full-screen ad audio can seize audio focus and create
+                // audible artifacts around note stop/start interactions.
             }
         }
     }

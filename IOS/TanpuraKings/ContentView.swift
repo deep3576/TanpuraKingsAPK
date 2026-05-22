@@ -93,11 +93,9 @@ struct ContentView: View {
                 TunerManager.shared.start()
             case .drone:
                 TunerManager.shared.stop()
-                // Only show interstitial when no drone is playing — never
-                // interrupt an active practice session with an ad.
-                if !AudioManager.shared.isPlaying {
-                    InterstitialAdManager.shared.showIfReady()
-                }
+                // Do not show interstitial ads during musical workflow.
+                // Full-screen ad audio can seize audio focus and cause audible
+                // artifacts when users resume/stop notes immediately after.
             }
         }
     }
