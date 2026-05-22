@@ -1114,11 +1114,19 @@ object AudioManager {
      */
     private fun startPlaybackService() {
         val ctx = appContext ?: return
-        val intent = Intent(ctx, AudioPlaybackService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            ctx.startForegroundService(intent)
-        } else {
-            ctx.startService(intent)
+        try {
+            val intent = Intent(ctx, AudioPlaybackService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(intent)
+            } else {
+                ctx.startService(intent)
+            }
+        } catch (e: Exception) {
+            // ForegroundServiceStartNotAllowedException on Android 12+ if
+            // the system blocks the start; SecurityException on Android 14+
+            // if service-type permissions are missing. Audio still plays —
+            // only the background-keep-alive notification is lost.
+            Log.w("AudioManager", "startPlaybackService failed: $e")
         }
     }
 
@@ -2330,20 +2338,24 @@ object InterstitialAdManager {
 
     fun load(context: Context) {
         if (interstitialAd != null) return
-        val adRequest = AdRequest.Builder().build()
-        InterstitialAd.load(
-            context,
-            "ca-app-pub-3492509358962490/9258488049",
-            adRequest,
-            object : InterstitialAdLoadCallback() {
-                override fun onAdLoaded(ad: InterstitialAd) {
-                    interstitialAd = ad
+        try {
+            val adRequest = AdRequest.Builder().build()
+            InterstitialAd.load(
+                context,
+                "ca-app-pub-3492509358962490/9258488049",
+                adRequest,
+                object : InterstitialAdLoadCallback() {
+                    override fun onAdLoaded(ad: InterstitialAd) {
+                        interstitialAd = ad
+                    }
+                    override fun onAdFailedToLoad(error: LoadAdError) {
+                        interstitialAd = null
+                    }
                 }
-                override fun onAdFailedToLoad(error: LoadAdError) {
-                    interstitialAd = null
-                }
-            }
-        )
+            )
+        } catch (e: Exception) {
+            Log.w("AdMob", "Interstitial load failed: $e")
+        }
     }
 
     fun showIfReady(activity: Activity, onDismissed: () -> Unit = {}) {
@@ -2379,12 +2391,20 @@ object InterstitialAdManager {
 @Composable
 fun BannerAdView(modifier: Modifier = Modifier) {
     AndroidView(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .height(50.dp),
         factory = { ctx ->
-            AdView(ctx).apply {
-                setAdSize(AdSize.BANNER)
-                adUnitId = "ca-app-pub-3492509358962490/2717130426"
-                loadAd(AdRequest.Builder().build())
+            try {
+                AdView(ctx).apply {
+                    setAdSize(AdSize.BANNER)
+                    adUnitId = "ca-app-pub-3492509358962490/2717130426"
+                    loadAd(AdRequest.Builder().build())
+                }
+            } catch (e: Exception) {
+                Log.w("AdMob", "BannerAdView init failed: $e")
+                // Return an empty View so the layout doesn't crash
+                android.view.View(ctx)
             }
         }
     )
@@ -2684,7 +2704,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        MobileAds.initialize(this) {}
+        // Initialize AdMob safely — catches failures on devices without
+        // Google Play Services or with outdated GMS versions.
+        try {
+            MobileAds.initialize(this) {}
+        } catch (e: Exception) {
+            Log.w("AdMob", "MobileAds.initialize failed: $e")
+        }
         setContent { TanpuraKingsApp() }
     }
 }
