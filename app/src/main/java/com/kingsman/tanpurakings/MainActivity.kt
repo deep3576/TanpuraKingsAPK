@@ -749,62 +749,26 @@ object AudioManager {
 
     fun stopNote(noteName: String) {
         val player = activePlayers.remove(noteName) ?: return
-        // Cancel the crossfade loop FIRST, then wait a tick so the finally
-        // block in crossfadeLoop releases any orphaned "next" player before
-        // we start our own fade — otherwise two players stop at once and
-        // the orphan's abrupt stop causes a loud pop.
-        val loopJob = loopJobs.remove(noteName)
-        loopJob?.cancel()
+        loopJobs.remove(noteName)?.cancel()
         echoJobs.remove(noteName)?.cancel()
         val effects = effectPlayers.remove(noteName)
         val subPlayer = subOctavePlayers.remove(noteName)
         val warmth = warmthBoosts.remove(noteName)
         val loudness = loudnessEnhancers.remove(noteName)
         val eq = equalizers.remove(noteName)
-        val nv = noteVolumes.remove(noteName) ?: 1f
-        val from = (currentMasterVolume * nv).coerceIn(0f, 1f)
+        noteVolumes.remove(noteName)
 
-        val scope = coroutineScope
-        if (scope == null) {
-            eq?.runCatching { release() }
-            warmth?.runCatching { release() }
-            loudness?.runCatching { release() }
-            effects?.forEach { ep -> runCatching { ep.stop() }; ep.release() }
-            subPlayer?.let { sp -> runCatching { sp.stop() }; sp.release() }
-            runCatching { player.stop() }; player.release()
-            return
-        }
-        scope.launch {
-            // Let the crossfade loop's finally block finish cleaning up its
-            // orphaned nextPlayer before we start fading — prevents two
-            // players being killed at once (double-pop).
-            loopJob?.join()
-
-            // Ramp ALL audio sources to zero before touching any effects.
-            val stepMs = NOTE_FADE_MS / NOTE_FADE_STEPS
-            for (i in 1..NOTE_FADE_STEPS) {
-                val alpha = i.toFloat() / NOTE_FADE_STEPS
-                val v = from * (1f - alpha)
-                runCatching { player.setVolume(v, v) }
-                subPlayer?.runCatching { setVolume(v, v) }
-                effects?.forEach { ep -> runCatching { ep.setVolume(v, v) } }
-                delay(stepMs)
-            }
-            // Silence the players before releasing effects to avoid any
-            // transient from the effect detach.
-            runCatching { player.setVolume(0f, 0f) }
-            subPlayer?.runCatching { setVolume(0f, 0f) }
-            effects?.forEach { ep -> runCatching { ep.setVolume(0f, 0f) } }
-
-            // Now release effects and players (all at zero volume).
-            warmth?.runCatching { release() }
-            loudness?.runCatching { release() }
-            eq?.runCatching { release() }
-            effects?.forEach { ep -> runCatching { ep.stop() }; ep.release() }
-            subPlayer?.let { sp -> runCatching { sp.stop() }; sp.release() }
-            runCatching { player.stop() }
-            player.release()
-        }
+        // Stop immediately — no fade. Silence first to minimise click.
+        runCatching { player.setVolume(0f, 0f) }
+        subPlayer?.runCatching { setVolume(0f, 0f) }
+        effects?.forEach { ep -> runCatching { ep.setVolume(0f, 0f) } }
+        warmth?.runCatching { release() }
+        loudness?.runCatching { release() }
+        eq?.runCatching { release() }
+        effects?.forEach { ep -> runCatching { ep.stop() }; ep.release() }
+        subPlayer?.let { sp -> runCatching { sp.stop() }; sp.release() }
+        runCatching { player.stop() }
+        player.release()
         updateMediaSession()
         // Stop the foreground service once the last note is gone so the
         // persistent notification is dismissed.
@@ -815,66 +779,33 @@ object AudioManager {
     }
 
     fun stopAllNotes() {
-        val allLoopJobs = loopJobs.values.toList()
         loopJobs.values.forEach { it.cancel() };  loopJobs.clear()
         echoJobs.values.forEach { it.cancel() };  echoJobs.clear()
 
-        // Collect everything that needs to fade, then clear the maps.
-        val allPlayers = activePlayers.values.toList()
-        val allSubs    = subOctavePlayers.values.toList()
-        val allEffects = effectPlayers.values.flatMap { it }
-        val allEqs     = equalizers.values.toList()
-        val volumes    = activePlayers.keys.map { name ->
-            (currentMasterVolume * (noteVolumes[name] ?: 1f)).coerceIn(0f, 1f)
-        }
+        val allPlayers  = activePlayers.values.toList()
+        val allSubs     = subOctavePlayers.values.toList()
+        val allEffects  = effectPlayers.values.flatMap { it }
+        val allEqs      = equalizers.values.toList()
         val allWarmth   = warmthBoosts.values.toList()
         val allLoudness = loudnessEnhancers.values.toList()
 
-        warmthBoosts.clear()
-        loudnessEnhancers.clear()
-        equalizers.clear(); effectPlayers.clear()
+        warmthBoosts.clear(); loudnessEnhancers.clear()
+        equalizers.clear();   effectPlayers.clear()
         subOctavePlayers.clear(); activePlayers.clear(); noteVolumes.clear()
         updateMediaSession()
 
-        val scope = coroutineScope
-        if (scope == null) {
-            allWarmth.forEach { runCatching { it.release() } }
-            allLoudness.forEach { runCatching { it.release() } }
-            allEqs.forEach { runCatching { it.release() } }
-            allEffects.forEach { ep -> runCatching { ep.stop() }; ep.release() }
-            allSubs.forEach { sp -> runCatching { sp.stop() }; sp.release() }
-            allPlayers.forEach { runCatching { it.stop() }; it.release() }
-            if (pausedNotesSnapshot.isEmpty()) stopPlaybackService()
-            return
-        }
-        scope.launch {
-            // Wait for crossfade loops to finish cleanup of orphaned players.
-            allLoopJobs.forEach { runCatching { it.join() } }
+        // Stop immediately — silence first then release.
+        allPlayers.forEach  { p  -> runCatching { p.setVolume(0f, 0f) } }
+        allSubs.forEach     { sp -> runCatching { sp.setVolume(0f, 0f) } }
+        allEffects.forEach  { ep -> runCatching { ep.setVolume(0f, 0f) } }
+        allWarmth.forEach   { runCatching { it.release() } }
+        allLoudness.forEach { runCatching { it.release() } }
+        allEqs.forEach      { runCatching { it.release() } }
+        allEffects.forEach  { ep -> runCatching { ep.stop() }; ep.release() }
+        allSubs.forEach     { sp -> runCatching { sp.stop() }; sp.release() }
+        allPlayers.forEach  { p  -> runCatching { p.stop() }; p.release() }
 
-            val stepMs = NOTE_FADE_MS / NOTE_FADE_STEPS
-            for (i in 1..NOTE_FADE_STEPS) {
-                val alpha = i.toFloat() / NOTE_FADE_STEPS
-                allPlayers.forEachIndexed { idx, p ->
-                    val v = (volumes.getOrElse(idx) { 1f }) * (1f - alpha)
-                    runCatching { p.setVolume(v, v) }
-                }
-                allSubs.forEach { sp -> runCatching { sp.setVolume((1f - alpha), (1f - alpha)) } }
-                allEffects.forEach { ep -> runCatching { ep.setVolume((1f - alpha), (1f - alpha)) } }
-                delay(stepMs)
-            }
-            // Force volume to absolute zero before releasing anything.
-            allPlayers.forEach { p -> runCatching { p.setVolume(0f, 0f) } }
-            allSubs.forEach { sp -> runCatching { sp.setVolume(0f, 0f) } }
-            allEffects.forEach { ep -> runCatching { ep.setVolume(0f, 0f) } }
-
-            allWarmth.forEach { runCatching { it.release() } }
-            allLoudness.forEach { runCatching { it.release() } }
-            allEqs.forEach { runCatching { it.release() } }
-            allEffects.forEach { ep -> runCatching { ep.stop() }; ep.release() }
-            allSubs.forEach { sp -> runCatching { sp.stop() }; sp.release() }
-            allPlayers.forEach { runCatching { it.stop() }; it.release() }
-            if (pausedNotesSnapshot.isEmpty()) stopPlaybackService()
-        }
+        if (pausedNotesSnapshot.isEmpty()) stopPlaybackService()
     }
 
     fun updateEffects(
@@ -2582,7 +2513,6 @@ fun TanpuraKingsApp() {
         containerColor = Color.Transparent,
         bottomBar = {
             Column {
-                BannerAdView()
                 NavigationBar(containerColor = Color.Black.copy(alpha = 0.85f)) {
                     NavigationBarItem(
                         selected = selectedTab == 0,
