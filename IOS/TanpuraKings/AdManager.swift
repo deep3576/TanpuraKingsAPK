@@ -1,6 +1,24 @@
 import SwiftUI
 import GoogleMobileAds
 
+
+private func activeRootViewController() -> UIViewController? {
+    let scenes = UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .filter { $0.activationState == .foregroundActive }
+
+    for scene in scenes {
+        if let keyWindow = scene.windows.first(where: { $0.isKeyWindow }),
+           let root = keyWindow.rootViewController {
+            return root
+        }
+        if let root = scene.windows.first(where: { !$0.isHidden })?.rootViewController {
+            return root
+        }
+    }
+    return nil
+}
+
 // MARK: - Banner Ad
 
 struct BannerAdView: UIViewRepresentable {
@@ -32,8 +50,7 @@ struct BannerAdView: UIViewRepresentable {
         guard let banner = context.coordinator.banner else { return }
         // rootViewController is only available once the view is in a window.
         if banner.rootViewController == nil,
-           let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let rootVC = windowScene.windows.first?.rootViewController {
+           let rootVC = activeRootViewController() {
             banner.rootViewController = rootVC
             banner.load(Request())
         }
@@ -94,8 +111,7 @@ final class InterstitialAdManager: ObservableObject {
             load()
             return
         }
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let rootVC = windowScene.windows.first?.rootViewController else { return }
+        guard let rootVC = activeRootViewController() else { return }
 
         ad.present(from: rootVC)
         lastShowTime = Date()
