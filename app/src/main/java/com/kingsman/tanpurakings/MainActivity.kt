@@ -749,12 +749,10 @@ object AudioManager {
         val player = activePlayers.remove(noteName) ?: return
         loopJobs.remove(noteName)?.cancel()
         echoJobs.remove(noteName)?.cancel()
-        effectPlayers.remove(noteName)?.forEach { ep ->
-            runCatching { ep.stop() }; ep.release()
-        }
-        subOctavePlayers.remove(noteName)?.let { sp ->
-            runCatching { sp.stop() }; sp.release()
-        }
+        // Collect auxiliary players so they fade out together with the main
+        // player — stopping them instantly causes a loud pop/click.
+        val effects = effectPlayers.remove(noteName)
+        val subPlayer = subOctavePlayers.remove(noteName)
         warmthBoosts.remove(noteName)?.runCatching { release() }
         loudnessEnhancers.remove(noteName)?.runCatching { release() }
         val eq = equalizers.remove(noteName)
@@ -765,6 +763,8 @@ object AudioManager {
         if (scope == null) {
             // Sync fallback (shouldn't happen during normal lifecycle).
             eq?.runCatching { release() }
+            effects?.forEach { ep -> runCatching { ep.stop() }; ep.release() }
+            subPlayer?.let { sp -> runCatching { sp.stop() }; sp.release() }
             runCatching { player.stop() }; player.release()
             return
         }
@@ -774,9 +774,13 @@ object AudioManager {
                 val alpha = i.toFloat() / NOTE_FADE_STEPS
                 val v = from * (1f - alpha)
                 runCatching { player.setVolume(v, v) }
+                subPlayer?.runCatching { setVolume(v, v) }
+                effects?.forEach { ep -> runCatching { ep.setVolume(v, v) } }
                 delay(stepMs)
             }
             eq?.runCatching { release() }
+            effects?.forEach { ep -> runCatching { ep.stop() }; ep.release() }
+            subPlayer?.let { sp -> runCatching { sp.stop() }; sp.release() }
             runCatching { player.stop() }
             player.release()
         }
@@ -792,25 +796,52 @@ object AudioManager {
     fun stopAllNotes() {
         loopJobs.values.forEach { it.cancel() };  loopJobs.clear()
         echoJobs.values.forEach { it.cancel() };  echoJobs.clear()
-        effectPlayers.values.forEach { list ->
-            list.forEach { ep -> runCatching { ep.stop() }; ep.release() }
-        };  effectPlayers.clear()
-        equalizers.values.forEach { runCatching { it.release() } };  equalizers.clear()
-        subOctavePlayers.values.forEach { sp -> runCatching { sp.stop() }; sp.release() }
-        subOctavePlayers.clear()
+
+        // Collect everything that needs to fade, then clear the maps.
+        val allPlayers = activePlayers.values.toList()
+        val allSubs    = subOctavePlayers.values.toList()
+        val allEffects = effectPlayers.values.flatMap { it }
+        val allEqs     = equalizers.values.toList()
+        val volumes    = activePlayers.keys.map { name ->
+            (currentMasterVolume * (noteVolumes[name] ?: 1f)).coerceIn(0f, 1f)
+        }
+
         warmthBoosts.values.forEach { runCatching { it.release() } }
         warmthBoosts.clear()
         loudnessEnhancers.values.forEach { runCatching { it.release() } }
         loudnessEnhancers.clear()
-        activePlayers.values.forEach { runCatching { it.stop() }; it.release() }
-        activePlayers.clear(); noteVolumes.clear()
+        equalizers.clear(); effectPlayers.clear()
+        subOctavePlayers.clear(); activePlayers.clear(); noteVolumes.clear()
         updateMediaSession()
-        // Keep the foreground service (and its notification) alive when a
-        // snapshot exists — the lock-screen Play button must remain visible so
-        // the user can resume without opening the app.
-        // The service is stopped when the snapshot is consumed (onPlay) or when
-        // the user explicitly stops everything with no snapshot.
-        if (pausedNotesSnapshot.isEmpty()) stopPlaybackService()
+
+        val scope = coroutineScope
+        if (scope == null) {
+            // Sync fallback
+            allEqs.forEach { runCatching { it.release() } }
+            allEffects.forEach { ep -> runCatching { ep.stop() }; ep.release() }
+            allSubs.forEach { sp -> runCatching { sp.stop() }; sp.release() }
+            allPlayers.forEach { runCatching { it.stop() }; it.release() }
+            if (pausedNotesSnapshot.isEmpty()) stopPlaybackService()
+            return
+        }
+        scope.launch {
+            val stepMs = NOTE_FADE_MS / NOTE_FADE_STEPS
+            for (i in 1..NOTE_FADE_STEPS) {
+                val alpha = i.toFloat() / NOTE_FADE_STEPS
+                allPlayers.forEachIndexed { idx, p ->
+                    val v = (volumes.getOrElse(idx) { 1f }) * (1f - alpha)
+                    runCatching { p.setVolume(v, v) }
+                }
+                allSubs.forEach { sp -> runCatching { val v = (1f - alpha); sp.setVolume(v, v) } }
+                allEffects.forEach { ep -> runCatching { val v = (1f - alpha); ep.setVolume(v, v) } }
+                delay(stepMs)
+            }
+            allEqs.forEach { runCatching { it.release() } }
+            allEffects.forEach { ep -> runCatching { ep.stop() }; ep.release() }
+            allSubs.forEach { sp -> runCatching { sp.stop() }; sp.release() }
+            allPlayers.forEach { runCatching { it.stop() }; it.release() }
+            if (pausedNotesSnapshot.isEmpty()) stopPlaybackService()
+        }
     }
 
     fun updateEffects(
