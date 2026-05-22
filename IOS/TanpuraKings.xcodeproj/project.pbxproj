@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		14A90DE62FC0635D00AC0109 /* Algorithms in Frameworks */ = {isa = PBXBuildFile; productRef = 14A90DE52FC0635D00AC0109 /* Algorithms */; };
+		14A90DE92FC0639300AC0109 /* ArgumentParser in Frameworks */ = {isa = PBXBuildFile; productRef = 14A90DE82FC0639300AC0109 /* ArgumentParser */; };
+		14A90DEC2FC063C800AC0109 /* SystemPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 14A90DEB2FC063C800AC0109 /* SystemPackage */; };
 		B100000100000000000000A1 /* TanpuraKingsApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100000100000000000000A1 /* TanpuraKingsApp.swift */; };
 		B100000200000000000000A1 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100000200000000000000A1 /* ContentView.swift */; };
 		B100000300000000000000A1 /* AudioManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100000300000000000000A1 /* AudioManager.swift */; };
@@ -20,10 +23,10 @@
 		B100000B00000000000000A1 /* TunerManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100000B00000000000000A1 /* TunerManager.swift */; };
 		B100000C00000000000000A1 /* TunerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100000C00000000000000A1 /* TunerView.swift */; };
 		B100000E00000000000000A1 /* OctavePickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100000E00000000000000A1 /* OctavePickerView.swift */; };
+		B100001000000000000000A1 /* AdManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100001000000000000000A1 /* AdManager.swift */; };
 		B200000100000000000000A1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F200000100000000000000A1 /* Assets.xcassets */; };
 		B200000200000000000000A1 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F200000200000000000000A1 /* Preview Assets.xcassets */; };
 		B400000100000000000000A1 /* Audio in Resources */ = {isa = PBXBuildFile; fileRef = F400000100000000000000A1 /* Audio */; };
-		B100001000000000000000A1 /* AdManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100001000000000000000A1 /* AdManager.swift */; };
 		B500000100000000000000A1 /* GoogleMobileAds in Frameworks */ = {isa = PBXBuildFile; productRef = PD00000100000000000000A1 /* GoogleMobileAds */; };
 /* End PBXBuildFile section */
 
@@ -40,8 +43,8 @@
 		F100000A00000000000000A1 /* MetronomePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetronomePanel.swift; sourceTree = "<group>"; };
 		F100000B00000000000000A1 /* TunerManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunerManager.swift; sourceTree = "<group>"; };
 		F100000C00000000000000A1 /* TunerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunerView.swift; sourceTree = "<group>"; };
-		F100000E00000000000000A1 /* OctavePickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OctavePickerView.swift; sourceTree = "<group>"; };
 		F100000D00000000000000A1 /* CarPlaySceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarPlaySceneDelegate.swift; sourceTree = "<group>"; };
+		F100000E00000000000000A1 /* OctavePickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OctavePickerView.swift; sourceTree = "<group>"; };
 		F100000F00000000000000A1 /* TanpuraKings.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TanpuraKings.entitlements; sourceTree = "<group>"; };
 		F100001000000000000000A1 /* AdManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdManager.swift; sourceTree = "<group>"; };
 		F200000100000000000000A1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -57,6 +60,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				14A90DE92FC0639300AC0109 /* ArgumentParser in Frameworks */,
+				14A90DE62FC0635D00AC0109 /* Algorithms in Frameworks */,
+				14A90DEC2FC063C800AC0109 /* SystemPackage in Frameworks */,
 				B500000100000000000000A1 /* GoogleMobileAds in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -142,6 +148,9 @@
 			name = TanpuraKings;
 			packageProductDependencies = (
 				PD00000100000000000000A1 /* GoogleMobileAds */,
+				14A90DE52FC0635D00AC0109 /* Algorithms */,
+				14A90DE82FC0639300AC0109 /* ArgumentParser */,
+				14A90DEB2FC063C800AC0109 /* SystemPackage */,
 			);
 			productName = TanpuraKings;
 			productReference = F500000100000000000000A1 /* TanpuraKings.app */;
@@ -171,12 +180,15 @@
 				Base,
 			);
 			mainGroup = G000000100000000000000A1;
+			packageReferences = (
+				PKG0000100000000000000A1 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */,
+				14A90DE42FC0635D00AC0109 /* XCRemoteSwiftPackageReference "swift-algorithms" */,
+				14A90DE72FC0639300AC0109 /* XCRemoteSwiftPackageReference "swift-argument-parser" */,
+				14A90DEA2FC063C800AC0109 /* XCRemoteSwiftPackageReference "swift-system" */,
+			);
 			productRefGroup = G300000100000000000000A1 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
-			packageReferences = (
-				PKG0000100000000000000A1 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */,
-			);
 			targets = (
 				T000000100000000000000A1 /* TanpuraKings */,
 			);
@@ -428,6 +440,30 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		14A90DE42FC0635D00AC0109 /* XCRemoteSwiftPackageReference "swift-algorithms" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-algorithms.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.2.1;
+			};
+		};
+		14A90DE72FC0639300AC0109 /* XCRemoteSwiftPackageReference "swift-argument-parser" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-argument-parser.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.7.1;
+			};
+		};
+		14A90DEA2FC063C800AC0109 /* XCRemoteSwiftPackageReference "swift-system" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-system.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.6.4;
+			};
+		};
 		PKG0000100000000000000A1 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/googleads/swift-package-manager-google-mobile-ads";
@@ -439,6 +475,21 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		14A90DE52FC0635D00AC0109 /* Algorithms */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 14A90DE42FC0635D00AC0109 /* XCRemoteSwiftPackageReference "swift-algorithms" */;
+			productName = Algorithms;
+		};
+		14A90DE82FC0639300AC0109 /* ArgumentParser */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 14A90DE72FC0639300AC0109 /* XCRemoteSwiftPackageReference "swift-argument-parser" */;
+			productName = ArgumentParser;
+		};
+		14A90DEB2FC063C800AC0109 /* SystemPackage */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 14A90DEA2FC063C800AC0109 /* XCRemoteSwiftPackageReference "swift-system" */;
+			productName = SystemPackage;
+		};
 		PD00000100000000000000A1 /* GoogleMobileAds */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = PKG0000100000000000000A1 /* XCRemoteSwiftPackageReference "swift-package-manager-google-mobile-ads" */;
