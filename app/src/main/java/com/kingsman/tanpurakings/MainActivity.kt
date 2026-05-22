@@ -143,6 +143,8 @@ object AudioManager {
 
     // One MediaPlayer per active note — provides proper seamless looping via crossfade
     private val activePlayers = mutableMapOf<String, MediaPlayer>()
+    /** True when at least one drone note is sounding. */
+    val isPlaying: Boolean get() = activePlayers.isNotEmpty()
     private val loopJobs     = mutableMapOf<String, Job>()
     private val noteVolumes  = mutableMapOf<String, Float>()
 
@@ -2556,9 +2558,13 @@ fun TanpuraKingsApp() {
             }
             0 -> {
                 TunerManager.stop()   // switched back to Drone — stop mic
-                val activity = context as? Activity
-                if (activity != null) {
-                    InterstitialAdManager.showIfReady(activity)
+                // Only show interstitial when no drone is playing — never
+                // interrupt an active practice session with an ad.
+                if (!AudioManager.isPlaying) {
+                    val activity = context as? Activity
+                    if (activity != null) {
+                        InterstitialAdManager.showIfReady(activity)
+                    }
                 }
             }
         }

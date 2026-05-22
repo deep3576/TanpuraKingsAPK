@@ -93,7 +93,11 @@ struct ContentView: View {
                 TunerManager.shared.start()
             case .drone:
                 TunerManager.shared.stop()
-                InterstitialAdManager.shared.showIfReady()
+                // Only show interstitial when no drone is playing — never
+                // interrupt an active practice session with an ad.
+                if !AudioManager.shared.isPlaying {
+                    InterstitialAdManager.shared.showIfReady()
+                }
             }
         }
     }

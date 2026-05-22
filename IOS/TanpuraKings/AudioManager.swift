@@ -97,6 +97,8 @@ final class AudioManager: NSObject {
     }
 
     private var activeNotes: [String: ActiveNote] = [:]
+    /// True when at least one drone note is sounding.
+    var isPlaying: Bool { !activeNotes.isEmpty }
     // Snapshot saved when pause/stop is triggered from the lock screen so the
     // play button can restore the same set of notes without opening the app.
     // Keyed by note name, value is the per-note volume (0–1).
