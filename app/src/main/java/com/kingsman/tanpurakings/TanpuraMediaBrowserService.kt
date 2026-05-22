@@ -50,14 +50,18 @@ class TanpuraMediaBrowserService : MediaBrowserServiceCompat() {
     // Content hierarchy
     // -------------------------------------------------------------------------
 
-    /** Known trusted clients allowed to browse and control playback. */
-    private val allowedClients = setOf(
-        "com.google.android.projection.genie",   // Android Auto
-        "com.google.android.autosimulator",       // AA desktop head unit
-        "com.android.bluetooth",                  // Bluetooth media browser
-        "com.google.android.googlequicksearchbox",// Google Assistant
-        packageName                               // This app itself
-    )
+    /** Known trusted clients allowed to browse and control playback.
+     *  Must be lazy — [packageName] requires a Context, which isn't
+     *  attached until after the constructor finishes. */
+    private val allowedClients by lazy {
+        setOf(
+            "com.google.android.projection.genie",   // Android Auto
+            "com.google.android.autosimulator",       // AA desktop head unit
+            "com.android.bluetooth",                  // Bluetooth media browser
+            "com.google.android.googlequicksearchbox",// Google Assistant
+            packageName                               // This app itself
+        )
+    }
 
     override fun onGetRoot(
         clientPackageName: String,
