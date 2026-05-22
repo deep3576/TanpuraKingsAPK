@@ -59,6 +59,7 @@ class TanpuraMediaBrowserService : MediaBrowserServiceCompat() {
             "com.google.android.autosimulator",       // AA desktop head unit
             "com.android.bluetooth",                  // Bluetooth media browser
             "com.google.android.googlequicksearchbox",// Google Assistant
+            "com.android.systemui",                   // Notification shade resume card
             packageName                               // This app itself
         )
     }
