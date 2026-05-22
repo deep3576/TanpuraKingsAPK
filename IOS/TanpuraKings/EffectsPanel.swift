@@ -76,13 +76,6 @@ struct EffectsPanel: View {
                 range: 0...1,
                 color: .cyan
             )
-            SliderWithLabel(
-                label: "Delay",
-                value: $echoDelay,
-                range: 50...1000,
-                color: .cyan,
-                formatter: { "\(Int($0)) ms" }
-            )
 
             sectionHeader("Octave Blend")
             SliderWithLabel(

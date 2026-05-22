@@ -749,15 +749,15 @@ object AudioManager {
 
     fun stopNote(noteName: String) {
         val player = activePlayers.remove(noteName) ?: return
-        loopJobs.remove(noteName)?.cancel()
+        // Cancel the crossfade loop FIRST, then wait a tick so the finally
+        // block in crossfadeLoop releases any orphaned "next" player before
+        // we start our own fade — otherwise two players stop at once and
+        // the orphan's abrupt stop causes a loud pop.
+        val loopJob = loopJobs.remove(noteName)
+        loopJob?.cancel()
         echoJobs.remove(noteName)?.cancel()
-        // Collect auxiliary players so they fade out together with the main
-        // player — stopping them instantly causes a loud pop/click.
         val effects = effectPlayers.remove(noteName)
         val subPlayer = subOctavePlayers.remove(noteName)
-        // Keep audio effects alive until AFTER the fade — releasing
-        // LoudnessEnhancer or BassBoost while audio is playing causes
-        // a loud volume spike.
         val warmth = warmthBoosts.remove(noteName)
         val loudness = loudnessEnhancers.remove(noteName)
         val eq = equalizers.remove(noteName)
@@ -775,6 +775,12 @@ object AudioManager {
             return
         }
         scope.launch {
+            // Let the crossfade loop's finally block finish cleaning up its
+            // orphaned nextPlayer before we start fading — prevents two
+            // players being killed at once (double-pop).
+            loopJob?.join()
+
+            // Ramp ALL audio sources to zero before touching any effects.
             val stepMs = NOTE_FADE_MS / NOTE_FADE_STEPS
             for (i in 1..NOTE_FADE_STEPS) {
                 val alpha = i.toFloat() / NOTE_FADE_STEPS
@@ -784,7 +790,13 @@ object AudioManager {
                 effects?.forEach { ep -> runCatching { ep.setVolume(v, v) } }
                 delay(stepMs)
             }
-            // Release effects only after volume is at zero
+            // Silence the players before releasing effects to avoid any
+            // transient from the effect detach.
+            runCatching { player.setVolume(0f, 0f) }
+            subPlayer?.runCatching { setVolume(0f, 0f) }
+            effects?.forEach { ep -> runCatching { ep.setVolume(0f, 0f) } }
+
+            // Now release effects and players (all at zero volume).
             warmth?.runCatching { release() }
             loudness?.runCatching { release() }
             eq?.runCatching { release() }
@@ -803,6 +815,7 @@ object AudioManager {
     }
 
     fun stopAllNotes() {
+        val allLoopJobs = loopJobs.values.toList()
         loopJobs.values.forEach { it.cancel() };  loopJobs.clear()
         echoJobs.values.forEach { it.cancel() };  echoJobs.clear()
 
@@ -814,10 +827,6 @@ object AudioManager {
         val volumes    = activePlayers.keys.map { name ->
             (currentMasterVolume * (noteVolumes[name] ?: 1f)).coerceIn(0f, 1f)
         }
-
-        // Keep audio effects alive until AFTER the fade — releasing
-        // LoudnessEnhancer or BassBoost while audio is playing causes
-        // a loud volume spike.
         val allWarmth   = warmthBoosts.values.toList()
         val allLoudness = loudnessEnhancers.values.toList()
 
@@ -829,7 +838,6 @@ object AudioManager {
 
         val scope = coroutineScope
         if (scope == null) {
-            // Sync fallback
             allWarmth.forEach { runCatching { it.release() } }
             allLoudness.forEach { runCatching { it.release() } }
             allEqs.forEach { runCatching { it.release() } }
@@ -840,6 +848,9 @@ object AudioManager {
             return
         }
         scope.launch {
+            // Wait for crossfade loops to finish cleanup of orphaned players.
+            allLoopJobs.forEach { runCatching { it.join() } }
+
             val stepMs = NOTE_FADE_MS / NOTE_FADE_STEPS
             for (i in 1..NOTE_FADE_STEPS) {
                 val alpha = i.toFloat() / NOTE_FADE_STEPS
@@ -847,11 +858,15 @@ object AudioManager {
                     val v = (volumes.getOrElse(idx) { 1f }) * (1f - alpha)
                     runCatching { p.setVolume(v, v) }
                 }
-                allSubs.forEach { sp -> runCatching { val v = (1f - alpha); sp.setVolume(v, v) } }
-                allEffects.forEach { ep -> runCatching { val v = (1f - alpha); ep.setVolume(v, v) } }
+                allSubs.forEach { sp -> runCatching { sp.setVolume((1f - alpha), (1f - alpha)) } }
+                allEffects.forEach { ep -> runCatching { ep.setVolume((1f - alpha), (1f - alpha)) } }
                 delay(stepMs)
             }
-            // Release effects only after volume is at zero
+            // Force volume to absolute zero before releasing anything.
+            allPlayers.forEach { p -> runCatching { p.setVolume(0f, 0f) } }
+            allSubs.forEach { sp -> runCatching { sp.setVolume(0f, 0f) } }
+            allEffects.forEach { ep -> runCatching { ep.setVolume(0f, 0f) } }
+
             allWarmth.forEach { runCatching { it.release() } }
             allLoudness.forEach { runCatching { it.release() } }
             allEqs.forEach { runCatching { it.release() } }
@@ -1580,8 +1595,6 @@ fun EffectsPanel(
 
         EffectSectionHeader("Echo")
         SliderWithLabel("Mix",   echoMix.value,   { echoMix.value = it },   0f..1f,    Color.Cyan)
-        SliderWithLabel("Delay", echoDelay.value, { echoDelay.value = it }, 50f..1000f, Color.Cyan
-        ) { "${it.toInt()} ms" }
 
         EffectSectionHeader("Octave Blend")
         SliderWithLabel("Sub Octave", subOctaveMix.value, { subOctaveMix.value = it }, 0f..1f,
