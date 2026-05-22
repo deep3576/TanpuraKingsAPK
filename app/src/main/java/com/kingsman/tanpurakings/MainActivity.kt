@@ -753,16 +753,20 @@ object AudioManager {
         // player — stopping them instantly causes a loud pop/click.
         val effects = effectPlayers.remove(noteName)
         val subPlayer = subOctavePlayers.remove(noteName)
-        warmthBoosts.remove(noteName)?.runCatching { release() }
-        loudnessEnhancers.remove(noteName)?.runCatching { release() }
+        // Keep audio effects alive until AFTER the fade — releasing
+        // LoudnessEnhancer or BassBoost while audio is playing causes
+        // a loud volume spike.
+        val warmth = warmthBoosts.remove(noteName)
+        val loudness = loudnessEnhancers.remove(noteName)
         val eq = equalizers.remove(noteName)
         val nv = noteVolumes.remove(noteName) ?: 1f
         val from = (currentMasterVolume * nv).coerceIn(0f, 1f)
 
         val scope = coroutineScope
         if (scope == null) {
-            // Sync fallback (shouldn't happen during normal lifecycle).
             eq?.runCatching { release() }
+            warmth?.runCatching { release() }
+            loudness?.runCatching { release() }
             effects?.forEach { ep -> runCatching { ep.stop() }; ep.release() }
             subPlayer?.let { sp -> runCatching { sp.stop() }; sp.release() }
             runCatching { player.stop() }; player.release()
@@ -778,6 +782,9 @@ object AudioManager {
                 effects?.forEach { ep -> runCatching { ep.setVolume(v, v) } }
                 delay(stepMs)
             }
+            // Release effects only after volume is at zero
+            warmth?.runCatching { release() }
+            loudness?.runCatching { release() }
             eq?.runCatching { release() }
             effects?.forEach { ep -> runCatching { ep.stop() }; ep.release() }
             subPlayer?.let { sp -> runCatching { sp.stop() }; sp.release() }
@@ -806,9 +813,13 @@ object AudioManager {
             (currentMasterVolume * (noteVolumes[name] ?: 1f)).coerceIn(0f, 1f)
         }
 
-        warmthBoosts.values.forEach { runCatching { it.release() } }
+        // Keep audio effects alive until AFTER the fade — releasing
+        // LoudnessEnhancer or BassBoost while audio is playing causes
+        // a loud volume spike.
+        val allWarmth   = warmthBoosts.values.toList()
+        val allLoudness = loudnessEnhancers.values.toList()
+
         warmthBoosts.clear()
-        loudnessEnhancers.values.forEach { runCatching { it.release() } }
         loudnessEnhancers.clear()
         equalizers.clear(); effectPlayers.clear()
         subOctavePlayers.clear(); activePlayers.clear(); noteVolumes.clear()
@@ -817,6 +828,8 @@ object AudioManager {
         val scope = coroutineScope
         if (scope == null) {
             // Sync fallback
+            allWarmth.forEach { runCatching { it.release() } }
+            allLoudness.forEach { runCatching { it.release() } }
             allEqs.forEach { runCatching { it.release() } }
             allEffects.forEach { ep -> runCatching { ep.stop() }; ep.release() }
             allSubs.forEach { sp -> runCatching { sp.stop() }; sp.release() }
@@ -836,6 +849,9 @@ object AudioManager {
                 allEffects.forEach { ep -> runCatching { val v = (1f - alpha); ep.setVolume(v, v) } }
                 delay(stepMs)
             }
+            // Release effects only after volume is at zero
+            allWarmth.forEach { runCatching { it.release() } }
+            allLoudness.forEach { runCatching { it.release() } }
             allEqs.forEach { runCatching { it.release() } }
             allEffects.forEach { ep -> runCatching { ep.stop() }; ep.release() }
             allSubs.forEach { sp -> runCatching { sp.stop() }; sp.release() }
