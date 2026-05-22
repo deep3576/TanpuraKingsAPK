@@ -97,6 +97,8 @@ final class AudioManager: NSObject {
     }
 
     private var activeNotes: [String: ActiveNote] = [:]
+    /// True when at least one drone note is sounding.
+    var isPlaying: Bool { !activeNotes.isEmpty }
     // Snapshot saved when pause/stop is triggered from the lock screen so the
     // play button can restore the same set of notes without opening the app.
     // Keyed by note name, value is the per-note volume (0–1).
@@ -756,6 +758,7 @@ final class AudioManager: NSObject {
         let dur = durationMs ?? noteFadeMs
         note.fadeGeneration += 1
         let from = note.player.volume
+        let subFrom = note.subPlayer?.volume ?? 0
         let steps = 20
         let stepDelay = dur / Double(steps) / 1000.0
         for i in 1...steps {
@@ -763,6 +766,7 @@ final class AudioManager: NSObject {
                 guard let note = note else { return }
                 let alpha = Float(i) / Float(steps)
                 note.player.volume = max(0, from * (1 - alpha))
+                note.subPlayer?.volume = max(0, subFrom * (1 - alpha))
             }
         }
         queue.asyncAfter(deadline: .now() + dur / 1000.0) { [weak self] in
