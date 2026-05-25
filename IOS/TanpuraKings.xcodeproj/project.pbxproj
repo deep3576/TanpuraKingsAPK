@@ -25,6 +25,7 @@
 		B100000E00000000000000A1 /* OctavePickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100000E00000000000000A1 /* OctavePickerView.swift */; };
 		B100001000000000000000A1 /* AdManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100001000000000000000A1 /* AdManager.swift */; };
 		B100001100000000000000A1 /* SplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100001100000000000000A1 /* SplashView.swift */; };
+		B100001200000000000000A1 /* TabTransitionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F100001200000000000000A1 /* TabTransitionView.swift */; };
 		B200000100000000000000A1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F200000100000000000000A1 /* Assets.xcassets */; };
 		B200000200000000000000A1 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F200000200000000000000A1 /* Preview Assets.xcassets */; };
 		B400000100000000000000A1 /* Audio in Resources */ = {isa = PBXBuildFile; fileRef = F400000100000000000000A1 /* Audio */; };
@@ -49,6 +50,7 @@
 		F100000F00000000000000A1 /* TanpuraKings.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TanpuraKings.entitlements; sourceTree = "<group>"; };
 		F100001000000000000000A1 /* AdManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdManager.swift; sourceTree = "<group>"; };
 		F100001100000000000000A1 /* SplashView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashView.swift; sourceTree = "<group>"; };
+		F100001200000000000000A1 /* TabTransitionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabTransitionView.swift; sourceTree = "<group>"; };
 		F200000100000000000000A1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F200000200000000000000A1 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		F300000100000000000000A1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -100,6 +102,7 @@
 				F100000D00000000000000A1 /* CarPlaySceneDelegate.swift */,
 				F100001000000000000000A1 /* AdManager.swift */,
 				F100001100000000000000A1 /* SplashView.swift */,
+				F100001200000000000000A1 /* TabTransitionView.swift */,
 				F100000F00000000000000A1 /* TanpuraKings.entitlements */,
 				F200000100000000000000A1 /* Assets.xcassets */,
 				F400000100000000000000A1 /* Audio */,
@@ -231,6 +234,7 @@
 				B100000E00000000000000A1 /* OctavePickerView.swift in Sources */,
 				B100001000000000000000A1 /* AdManager.swift in Sources */,
 				B100001100000000000000A1 /* SplashView.swift in Sources */,
+				B100001200000000000000A1 /* TabTransitionView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

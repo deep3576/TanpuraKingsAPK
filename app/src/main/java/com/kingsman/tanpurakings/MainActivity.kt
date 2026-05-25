@@ -2494,23 +2494,22 @@ fun TanpuraKingsApp() {
     }
 
     var selectedTab by remember { mutableIntStateOf(0) }
+    // When true, the tab-transition loading screen is visible.
+    var showTabTransition by remember { mutableStateOf(false) }
+    // The tab we're navigating TO (used to commit the switch after the ad).
+    var pendingTab by remember { mutableIntStateOf(0) }
 
-    // Tab-switch side-effects: mirror iOS ContentView.onChange(of: selectedTab)
+    // Commit side-effects when the tab actually changes.
     LaunchedEffect(selectedTab) {
         when (selectedTab) {
-            1 -> {  // switched to Tuner — stop drone so mic doesn't pick it up
+            1 -> {  // Tuner is now active
                 metronomeOn.value = false
                 AudioManager.stopMetronome()
                 AudioManager.stopAllNotes()
                 activeNotes.value      = emptySet()
                 activeNoteVolumes.value = emptyMap()
             }
-            0 -> {
-                TunerManager.stop()   // switched back to Drone — stop mic
-                // Do not show interstitial ads during musical workflow.
-                // Full-screen ad audio can seize audio focus and create
-                // audible artifacts around note stop/start interactions.
-            }
+            0 -> TunerManager.stop()
         }
     }
 
@@ -2527,7 +2526,13 @@ fun TanpuraKingsApp() {
                     )
                     NavigationBarItem(
                         selected = selectedTab == 1,
-                        onClick  = { selectedTab = 1 },
+                        onClick  = {
+                            if (selectedTab != 1) {
+                                // Show transition screen with ad before switching.
+                                pendingTab = 1
+                                showTabTransition = true
+                            }
+                        },
                         icon     = { Text("🎤", fontSize = 18.sp) },
                         label    = { Text("Tuner", color = if (selectedTab == 1) Color(0xFFFFA500) else Color(0xFF888888)) }
                     )
@@ -2547,6 +2552,137 @@ fun TanpuraKingsApp() {
                 )
                 1 -> TunerScreen()
             }
+
+            // Tab-transition overlay — shown when tapping Tuner from Drone.
+            if (showTabTransition) {
+                TabTransitionScreen(
+                    onReady = {
+                        showTabTransition = false
+                        selectedTab = pendingTab
+                    }
+                )
+            }
+        }
+    }
+}
+
+// ------------------------------
+// TabTransitionScreen
+// Shown when switching Drone → Tuner. Loads + shows an interstitial
+// then calls onReady to complete the tab switch.
+// ------------------------------
+private val tunerLoadingStages = listOf(
+    0.25f to "Stopping drone...",
+    0.55f to "Starting microphone...",
+    0.80f to "Loading advertisement...",
+    1.00f to "Ready!"
+)
+
+@Composable
+fun TabTransitionScreen(onReady: () -> Unit) {
+    val context = LocalContext.current
+    val activity = context as? Activity
+
+    var progress by remember { mutableFloatStateOf(0f) }
+    val animatedProgress by animateFloatAsState(
+        targetValue = progress,
+        animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+        label = "transitionProgress"
+    )
+    var stageLabel by remember { mutableStateOf(tunerLoadingStages.first().second) }
+
+    LaunchedEffect(Unit) {
+        InterstitialAdManager.load(context)
+
+        for ((target, label) in tunerLoadingStages.dropLast(1)) {
+            progress = target
+            stageLabel = label
+            delay(300)
+        }
+
+        // Poll for ad (up to 1.5s extra)
+        var waited = 0L
+        while (waited < 1500L && !InterstitialAdManager.isReady) {
+            delay(100); waited += 100
+        }
+
+        progress = 1f
+        stageLabel = "Ready!"
+        delay(200)
+
+        if (activity != null && InterstitialAdManager.isReady) {
+            InterstitialAdManager.showIfReady(activity, onDismissed = { onReady() }, ignoreCooldown = false)
+        } else {
+            onReady()
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0A0A1A)),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(280.dp)
+                .background(
+                    Brush.radialGradient(
+                        listOf(Color(0xFF5500AA).copy(alpha = 0.4f), Color.Transparent)
+                    )
+                )
+        )
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 40.dp)
+        ) {
+            Spacer(modifier = Modifier.weight(1f))
+            Text("🎤", fontSize = 64.sp)
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "CHROMATIC TUNER",
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 3.sp,
+                color = Color.White
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = stageLabel,
+                    fontSize = 12.sp,
+                    color = Color(0xFFFFA500),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color.White.copy(alpha = 0.1f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(animatedProgress)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(Color(0xFFFFA500), Color(0xFFFF6600))
+                                )
+                            )
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "${(animatedProgress * 100).toInt()}%",
+                    fontSize = 11.sp,
+                    color = Color(0xFF888888),
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                )
+            }
+            Spacer(modifier = Modifier.height(32.dp))
         }
     }
 }

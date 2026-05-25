@@ -12,6 +12,7 @@ struct ContentView: View {
     enum AppTab: Hashable { case drone, tuner }
 
     @State private var selectedTab: AppTab = .drone
+    @State private var showTabTransition: Bool = false
 
     // Drone-tab state (kept here so it survives tab switches).
     @State private var activeNotes: Set<String> = []
@@ -77,25 +78,34 @@ struct ContentView: View {
         }
         .onAppear {
             AudioManager.shared.initializeIfNeeded()
-            // Restore persisted octave into the audio engine on every launch.
             AudioManager.shared.updateOctave(selectedOctave)
         }
         .onChange(of: selectedTab) { _, newValue in
             switch newValue {
             case .tuner:
-                // Mic input would otherwise pick up our own drone +
-                // metronome and confuse the pitch detector.
-                metronomeOn = false
-                AudioManager.shared.stopMetronome()
-                AudioManager.shared.stopAllNotes()
-                activeNotes.removeAll()
-                activeNoteVolumes.removeAll()
-                TunerManager.shared.start()
+                // Intercept: revert tab immediately and show transition screen.
+                selectedTab = .drone
+                showTabTransition = true
             case .drone:
                 TunerManager.shared.stop()
-                // Do not show interstitial ads during musical workflow.
-                // Full-screen ad audio can seize audio focus and cause audible
-                // artifacts when users resume/stop notes immediately after.
+            }
+        }
+        // Tab-transition overlay — shown when switching Drone → Tuner.
+        .overlay {
+            if showTabTransition {
+                TabTransitionView {
+                    showTabTransition = false
+                    // Now actually commit the tab switch (bypasses intercept
+                    // because we go drone→tuner only after transition).
+                    metronomeOn = false
+                    AudioManager.shared.stopMetronome()
+                    AudioManager.shared.stopAllNotes()
+                    activeNotes.removeAll()
+                    activeNoteVolumes.removeAll()
+                    TunerManager.shared.start()
+                    selectedTab = .tuner
+                }
+                .ignoresSafeArea()
             }
         }
     }
