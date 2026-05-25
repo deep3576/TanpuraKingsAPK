@@ -7,6 +7,7 @@ struct TanpuraKingsApp: App {
     @State private var didRequestATT = false
     @State private var splashDone = false
     @AppStorage("hasShownOnboarding") private var hasShownOnboarding: Bool = false
+    @AppStorage("hasShownOnboarding_iPadFix") private var hasShownOnboardingIPadFix: Bool = false
 
     init() {
         #if DEBUG
@@ -22,6 +23,11 @@ struct TanpuraKingsApp: App {
         InterstitialAdManager.shared.load()
     }
 
+
+    private var shouldForceIPadOnboarding: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad && !hasShownOnboardingIPadFix
+    }
+
     var body: some Scene {
         WindowGroup {
             if !splashDone {
@@ -29,9 +35,12 @@ struct TanpuraKingsApp: App {
                     splashDone = true
                     requestTrackingOnce()
                 }
-            } else if !hasShownOnboarding {
+            } else if shouldForceIPadOnboarding || !hasShownOnboarding {
                 OnboardingView {
                     hasShownOnboarding = true
+                    if UIDevice.current.userInterfaceIdiom == .pad {
+                        hasShownOnboardingIPadFix = true
+                    }
                 }
             } else {
                 ContentView()
