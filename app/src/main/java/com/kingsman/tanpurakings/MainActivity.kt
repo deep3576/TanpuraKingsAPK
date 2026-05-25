@@ -2633,7 +2633,7 @@ fun TabTransitionScreen(
         delay(200)
 
         if (activity != null && InterstitialAdManager.isReady) {
-            InterstitialAdManager.showIfReady(activity, onDismissed = { onReady() }, ignoreCooldown = false)
+            InterstitialAdManager.showIfReady(activity, onDismissed = { onReady() }, ignoreCooldown = true)
         } else {
             onReady()
         }

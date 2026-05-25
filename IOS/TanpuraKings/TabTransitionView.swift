@@ -149,7 +149,7 @@ struct TabTransitionView: View {
 
         await MainActor.run {
             if InterstitialAdManager.shared.isReady {
-                InterstitialAdManager.shared.showIfReady(onDismissed: onFinished, ignoreCooldown: false)
+                InterstitialAdManager.shared.showIfReady(onDismissed: onFinished, ignoreCooldown: true)
             } else {
                 onFinished()
             }
