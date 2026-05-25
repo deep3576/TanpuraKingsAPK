@@ -32,6 +32,7 @@ import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
 import com.google.android.gms.ads.MobileAds
 import com.google.android.gms.ads.LoadAdError
+import com.google.android.gms.ads.RequestConfiguration
 import com.google.android.gms.ads.interstitial.InterstitialAd
 import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback
 import com.google.android.gms.ads.FullScreenContentCallback
@@ -2335,6 +2336,7 @@ private fun TunerHistoryGraph(history: List<Float>, modifier: Modifier = Modifie
 // ------------------------------
 object InterstitialAdManager {
     private var interstitialAd: InterstitialAd? = null
+    private var isLoading: Boolean = false
     private var lastShowTime: Long = 0L
     private const val MIN_INTERVAL_MS = 180_000L // 3 minutes between interstitials
 
@@ -2342,24 +2344,29 @@ object InterstitialAdManager {
     val isReady: Boolean get() = interstitialAd != null
 
     fun load(context: Context) {
-        if (interstitialAd != null) return
+        if (interstitialAd != null || isLoading) return
+        isLoading = true
         try {
             val adRequest = AdRequest.Builder().build()
             InterstitialAd.load(
-                context,
+                context.applicationContext,
                 "ca-app-pub-3492509358962490/9258488049",
                 adRequest,
                 object : InterstitialAdLoadCallback() {
                     override fun onAdLoaded(ad: InterstitialAd) {
                         interstitialAd = ad
+                        isLoading = false
                     }
                     override fun onAdFailedToLoad(error: LoadAdError) {
+                        Log.w("AdMob", "Interstitial failed to load: ${error.message}")
                         interstitialAd = null
+                        isLoading = false
                     }
                 }
             )
         } catch (e: Exception) {
             Log.w("AdMob", "Interstitial load failed: $e")
+            isLoading = false
         }
     }
 
@@ -2371,6 +2378,7 @@ object InterstitialAdManager {
             ad.fullScreenContentCallback = object : FullScreenContentCallback() {
                 override fun onAdDismissedFullScreenContent() {
                     interstitialAd = null
+                    isLoading = false
                     lastShowTime = System.currentTimeMillis()
                     onDismissed()
                     // Pre-load next
@@ -2378,6 +2386,7 @@ object InterstitialAdManager {
                 }
                 override fun onAdFailedToShowFullScreenContent(error: com.google.android.gms.ads.AdError) {
                     interstitialAd = null
+                    isLoading = false
                     onDismissed()
                     load(activity)
                 }
@@ -2865,6 +2874,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        // Register test device BEFORE initialize so test ads are served during development.
+        val requestConfig = RequestConfiguration.Builder()
+            .setTestDeviceIds(listOf("b3521832b95e96a2e53992aa7dcd94cf"))
+            .build()
+        MobileAds.setRequestConfiguration(requestConfig)
         try {
             MobileAds.initialize(this) {}
         } catch (e: Exception) {
