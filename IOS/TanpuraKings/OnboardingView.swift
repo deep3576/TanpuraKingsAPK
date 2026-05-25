@@ -31,8 +31,11 @@ struct OnboardingView: View {
     let onFinished: () -> Void
 
     @State private var currentPage = 0
+    @Environment(\.horizontalSizeClass) private var hSizeClass
 
     private var isLast: Bool { currentPage == onboardingPages.count - 1 }
+    /// On iPad (regular) cap the card width so content doesn't stretch edge-to-edge.
+    private var maxCardWidth: CGFloat { hSizeClass == .regular ? 600 : .infinity }
 
     var body: some View {
         ZStack {
@@ -47,7 +50,7 @@ struct OnboardingView: View {
             .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Skip button row
+                // Skip button
                 HStack {
                     Spacer()
                     if !isLast {
@@ -59,25 +62,32 @@ struct OnboardingView: View {
                         Color.clear.frame(height: 52)
                     }
                 }
+                .frame(maxWidth: maxCardWidth)
 
-                // Swipeable pages
+                // Swipeable pages — must be .infinity height so it fills the VStack.
                 TabView(selection: $currentPage) {
                     ForEach(onboardingPages.indices, id: \.self) { idx in
-                        pageCard(onboardingPages[idx]).tag(idx)
+                        pageCard(onboardingPages[idx])
+                            .frame(maxWidth: maxCardWidth)
+                            .tag(idx)
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
+                .frame(maxWidth: .infinity, maxHeight: .infinity) // ← fixes iPad collapse
 
                 // Dot indicators
                 HStack(spacing: 8) {
                     ForEach(onboardingPages.indices, id: \.self) { idx in
                         Circle()
                             .fill(idx == currentPage ? Color.white : Color.white.opacity(0.3))
-                            .frame(width: idx == currentPage ? 10 : 7, height: idx == currentPage ? 10 : 7)
+                            .frame(
+                                width:  idx == currentPage ? 10 : 7,
+                                height: idx == currentPage ? 10 : 7
+                            )
                             .animation(.easeInOut(duration: 0.2), value: currentPage)
                     }
                 }
-                .padding(.bottom, 24)
+                .padding(.bottom, 20)
 
                 // Next / Get Started button
                 Button(action: advance) {
@@ -89,9 +99,11 @@ struct OnboardingView: View {
                         .background(Color(red: 1.0, green: 165/255, blue: 0))
                         .clipShape(Capsule())
                 }
+                .frame(maxWidth: maxCardWidth)
                 .padding(.horizontal, 32)
                 .padding(.bottom, 44)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -99,14 +111,15 @@ struct OnboardingView: View {
     private func pageCard(_ page: OnboardingPage) -> some View {
         VStack(spacing: 20) {
             Spacer()
-            Text(page.emoji).font(.system(size: 80))
+            Text(page.emoji)
+                .font(.system(size: hSizeClass == .regular ? 100 : 80))
             Text(page.title)
-                .font(.system(size: 26, weight: .bold))
+                .font(.system(size: hSizeClass == .regular ? 32 : 26, weight: .bold))
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
             Text(page.description)
-                .font(.system(size: 16))
+                .font(.system(size: hSizeClass == .regular ? 18 : 16))
                 .foregroundColor(.white.opacity(0.88))
                 .multilineTextAlignment(.center)
                 .lineSpacing(5)
