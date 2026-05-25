@@ -3000,6 +3000,7 @@ fun AppRoot() {
     val context = LocalContext.current
     val activity = context as? Activity
     val prefs = remember { context.getSharedPreferences("TanpuraKingsPrefs", Context.MODE_PRIVATE) }
+    val isTablet = remember { context.resources.configuration.smallestScreenWidthDp >= 600 }
 
     var splashDone  by remember { mutableStateOf(false) }
     var showOnboarding by remember { mutableStateOf(false) }
