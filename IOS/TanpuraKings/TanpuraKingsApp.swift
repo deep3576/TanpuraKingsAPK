@@ -10,7 +10,8 @@ struct TanpuraKingsApp: App {
     init() {
         #if DEBUG
         MobileAds.shared.requestConfiguration.testDeviceIdentifiers = [
-            "b3521832b95e96a2e53992aa7dcd94cf"
+            "b3521832b95e96a2e53992aa7dcd94cf", // Android test device
+            "b20f11d7d93dbfea6f6ea7ed2365fae4"  // iOS test device
         ]
         #endif
         MobileAds.shared.start()
