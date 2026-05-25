@@ -2520,7 +2520,13 @@ fun TanpuraKingsApp() {
                 NavigationBar(containerColor = Color.Black.copy(alpha = 0.85f)) {
                     NavigationBarItem(
                         selected = selectedTab == 0,
-                        onClick  = { selectedTab = 0 },
+                        onClick  = {
+                            if (selectedTab != 0) {
+                                // Show transition screen with ad before switching back to Drone.
+                                pendingTab = 0
+                                showTabTransition = true
+                            }
+                        },
                         icon     = { Text("♪", fontSize = 22.sp, color = if (selectedTab == 0) Color(0xFFFFA500) else Color(0xFF888888)) },
                         label    = { Text("Drone", color = if (selectedTab == 0) Color(0xFFFFA500) else Color(0xFF888888)) }
                     )
@@ -2553,9 +2559,13 @@ fun TanpuraKingsApp() {
                 1 -> TunerScreen()
             }
 
-            // Tab-transition overlay — shown when tapping Tuner from Drone.
+            // Tab-transition overlay — shown when switching between Drone and Tuner.
             if (showTabTransition) {
+                val goingToDrone = pendingTab == 0
                 TabTransitionScreen(
+                    stages  = if (goingToDrone) droneLoadingStages else tunerLoadingStages,
+                    emoji   = if (goingToDrone) "♪" else "🎤",
+                    title   = if (goingToDrone) "DRONE PLAYER" else "CHROMATIC TUNER",
                     onReady = {
                         showTabTransition = false
                         selectedTab = pendingTab
@@ -2578,8 +2588,20 @@ private val tunerLoadingStages = listOf(
     1.00f to "Ready!"
 )
 
+private val droneLoadingStages = listOf(
+    0.25f to "Stopping tuner...",
+    0.55f to "Initializing drone...",
+    0.80f to "Loading advertisement...",
+    1.00f to "Ready!"
+)
+
 @Composable
-fun TabTransitionScreen(onReady: () -> Unit) {
+fun TabTransitionScreen(
+    stages: List<Pair<Float, String>>,
+    emoji: String,
+    title: String,
+    onReady: () -> Unit
+) {
     val context = LocalContext.current
     val activity = context as? Activity
 
@@ -2589,12 +2611,12 @@ fun TabTransitionScreen(onReady: () -> Unit) {
         animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
         label = "transitionProgress"
     )
-    var stageLabel by remember { mutableStateOf(tunerLoadingStages.first().second) }
+    var stageLabel by remember { mutableStateOf(stages.first().second) }
 
     LaunchedEffect(Unit) {
         InterstitialAdManager.load(context)
 
-        for ((target, label) in tunerLoadingStages.dropLast(1)) {
+        for ((target, label) in stages.dropLast(1)) {
             progress = target
             stageLabel = label
             delay(300)
@@ -2637,10 +2659,10 @@ fun TabTransitionScreen(onReady: () -> Unit) {
             modifier = Modifier.fillMaxWidth().padding(horizontal = 40.dp)
         ) {
             Spacer(modifier = Modifier.weight(1f))
-            Text("🎤", fontSize = 64.sp)
+            Text(emoji, fontSize = 64.sp)
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "CHROMATIC TUNER",
+                text = title,
                 fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 3.sp,

@@ -1,20 +1,38 @@
 import SwiftUI
 
-private let tunerLoadingStages: [(Float, String)] = [
+// Stage arrays are internal so ContentView can reference them by name.
+
+let toTunerStages: [(Float, String)] = [
     (0.25, "Stopping drone..."),
     (0.55, "Starting microphone..."),
     (0.80, "Loading advertisement..."),
     (1.00, "Ready!")
 ]
 
-/// Full-screen overlay shown when switching from the Drone tab to the Tuner tab.
+let toDroneStages: [(Float, String)] = [
+    (0.25, "Stopping tuner..."),
+    (0.55, "Initializing drone..."),
+    (0.80, "Loading advertisement..."),
+    (1.00, "Ready!")
+]
+
+/// Full-screen overlay shown when switching between the Drone and Tuner tabs.
 /// Mirrors the game-style splash screen: dark background, radial glow, animated
 /// orange progress bar, then an interstitial ad before calling `onFinished`.
 struct TabTransitionView: View {
+    let subtitle: String
+    let stages: [(Float, String)]
     let onFinished: () -> Void
 
     @State private var progress: Float = 0
-    @State private var stageLabel: String = tunerLoadingStages.first!.1
+    @State private var stageLabel: String
+
+    init(subtitle: String, stages: [(Float, String)], onFinished: @escaping () -> Void) {
+        self.subtitle = subtitle
+        self.stages = stages
+        self.onFinished = onFinished
+        self._stageLabel = State(initialValue: stages.first!.1)
+    }
 
     var body: some View {
         ZStack {
@@ -52,7 +70,7 @@ struct TabTransitionView: View {
 
                 Spacer().frame(height: 4)
 
-                Text("Switching to Tuner...")
+                Text(subtitle)
                     .font(.system(size: 12))
                     .foregroundColor(Color(white: 0.67))
 
@@ -107,7 +125,7 @@ struct TabTransitionView: View {
 
     private func runTransitionSequence() async {
         // Step through each loading stage
-        for (target, label) in tunerLoadingStages.dropLast() {
+        for (target, label) in stages.dropLast() {
             await MainActor.run {
                 progress = target
                 stageLabel = label

@@ -12,7 +12,12 @@ struct ContentView: View {
     enum AppTab: Hashable { case drone, tuner }
 
     @State private var selectedTab: AppTab = .drone
-    @State private var showTabTransition: Bool = false
+    @State private var showTabTransition: Bool = false   // Drone → Tuner
+    @State private var showDroneTransition: Bool = false // Tuner → Drone
+
+    // True while either transition overlay is visible — used to block the
+    // custom TabView binding so a mid-transition tap can't start a second one.
+    private var isTransitioning: Bool { showTabTransition || showDroneTransition }
 
     // Drone-tab state (kept here so it survives tab switches).
     @State private var activeNotes: Set<String> = []
@@ -41,7 +46,19 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TabView(selection: $selectedTab) {
+            // Custom binding intercepts tab taps so we can show the transition
+            // screen before actually switching. Setting selectedTab directly
+            // (in onFinished callbacks) does NOT call this setter.
+            TabView(selection: Binding(
+                get: { selectedTab },
+                set: { newTab in
+                    guard !isTransitioning, newTab != selectedTab else { return }
+                    switch newTab {
+                    case .tuner: showTabTransition = true
+                    case .drone: showDroneTransition = true
+                    }
+                }
+            )) {
                 DroneView(
                     activeNotes: $activeNotes,
                     activeNoteVolumes: $activeNoteVolumes,
@@ -80,23 +97,14 @@ struct ContentView: View {
             AudioManager.shared.initializeIfNeeded()
             AudioManager.shared.updateOctave(selectedOctave)
         }
-        .onChange(of: selectedTab) { _, newValue in
-            switch newValue {
-            case .tuner:
-                // Intercept: revert tab immediately and show transition screen.
-                selectedTab = .drone
-                showTabTransition = true
-            case .drone:
-                TunerManager.shared.stop()
-            }
-        }
-        // Tab-transition overlay — shown when switching Drone → Tuner.
+        // Drone → Tuner transition overlay
         .overlay {
             if showTabTransition {
-                TabTransitionView {
+                TabTransitionView(
+                    subtitle: "Switching to Tuner...",
+                    stages: toTunerStages
+                ) {
                     showTabTransition = false
-                    // Now actually commit the tab switch (bypasses intercept
-                    // because we go drone→tuner only after transition).
                     metronomeOn = false
                     AudioManager.shared.stopMetronome()
                     AudioManager.shared.stopAllNotes()
@@ -104,6 +112,20 @@ struct ContentView: View {
                     activeNoteVolumes.removeAll()
                     TunerManager.shared.start()
                     selectedTab = .tuner
+                }
+                .ignoresSafeArea()
+            }
+        }
+        // Tuner → Drone transition overlay
+        .overlay {
+            if showDroneTransition {
+                TabTransitionView(
+                    subtitle: "Switching to Drone...",
+                    stages: toDroneStages
+                ) {
+                    showDroneTransition = false
+                    TunerManager.shared.stop()
+                    selectedTab = .drone
                 }
                 .ignoresSafeArea()
             }
