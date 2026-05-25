@@ -85,8 +85,10 @@ final class InterstitialAdManager: ObservableObject {
 
     private init() {}
 
+    /// True when an interstitial is loaded and ready to display.
+    var isReady: Bool { interstitialAd != nil }
+
     func load() {
-        // Don't reload if we already have one ready
         guard interstitialAd == nil else { return }
         InterstitialAd.load(
             with: "ca-app-pub-3492509358962490/4402885253",
@@ -94,7 +96,6 @@ final class InterstitialAdManager: ObservableObject {
         ) { [weak self] ad, error in
             if let error = error {
                 debugLog("Interstitial failed to load: \(error.localizedDescription)")
-                // Retry after 60 seconds
                 DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
                     self?.load()
                 }
@@ -105,18 +106,54 @@ final class InterstitialAdManager: ObservableObject {
         }
     }
 
-    func showIfReady() {
-        guard Date().timeIntervalSince(lastShowTime) >= minInterval else { return }
+    /// Show the interstitial if one is ready.
+    /// - Parameters:
+    ///   - onDismissed: Called after the ad is dismissed or if no ad is shown.
+    ///   - ignoreCooldown: Skip the 3-minute cooldown (use for splash-screen ads).
+    func showIfReady(onDismissed: (() -> Void)? = nil, ignoreCooldown: Bool = false) {
+        if !ignoreCooldown {
+            guard Date().timeIntervalSince(lastShowTime) >= minInterval else {
+                onDismissed?()
+                return
+            }
+        }
         guard let ad = interstitialAd else {
             load()
+            onDismissed?()
             return
         }
-        guard let rootVC = activeRootViewController() else { return }
+        guard let rootVC = activeRootViewController() else {
+            onDismissed?()
+            return
+        }
+
+        // Set up dismiss callback via a delegate wrapper.
+        let handler = AdDismissHandler {
+            self.lastShowTime = Date()
+            self.interstitialAd = nil
+            self.load()
+            onDismissed?()
+        }
+        ad.fullScreenContentDelegate = handler
+        // Retain handler for the duration of the ad.
+        objc_setAssociatedObject(ad, AssociatedKeys.handler, handler, .OBJC_ASSOCIATION_RETAIN)
 
         ad.present(from: rootVC)
-        lastShowTime = Date()
-        interstitialAd = nil
-        // Pre-load next
-        load()
+    }
+}
+
+private enum AssociatedKeys {
+    static let handler = UnsafeRawPointer(bitPattern: "adDismissHandler".hashValue)!
+}
+
+/// Bridges GADFullScreenContentDelegate callbacks to a Swift closure.
+private final class AdDismissHandler: NSObject, FullScreenContentDelegate {
+    private let onDone: () -> Void
+    init(_ onDone: @escaping () -> Void) { self.onDone = onDone }
+
+    func adDidDismissFullScreenContent(_ ad: FullScreenPresentingAd) { onDone() }
+    func ad(_ ad: FullScreenPresentingAd, didFailToPresentFullScreenContentWithError error: Error) {
+        debugLog("Interstitial failed to present: \(error.localizedDescription)")
+        onDone()
     }
 }

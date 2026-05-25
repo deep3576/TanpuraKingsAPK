@@ -112,6 +112,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -2329,6 +2330,9 @@ object InterstitialAdManager {
     private var lastShowTime: Long = 0L
     private const val MIN_INTERVAL_MS = 180_000L // 3 minutes between interstitials
 
+    /** True when an interstitial is loaded and ready to display. */
+    val isReady: Boolean get() = interstitialAd != null
+
     fun load(context: Context) {
         if (interstitialAd != null) return
         try {
@@ -2351,9 +2355,9 @@ object InterstitialAdManager {
         }
     }
 
-    fun showIfReady(activity: Activity, onDismissed: () -> Unit = {}) {
+    fun showIfReady(activity: Activity, onDismissed: () -> Unit = {}, ignoreCooldown: Boolean = false) {
         val now = System.currentTimeMillis()
-        if (now - lastShowTime < MIN_INTERVAL_MS) { onDismissed(); return }
+        if (!ignoreCooldown && now - lastShowTime < MIN_INTERVAL_MS) { onDismissed(); return }
         val ad = interstitialAd
         if (ad != null) {
             ad.fullScreenContentCallback = object : FullScreenContentCallback() {
@@ -2695,14 +2699,113 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        // Initialize AdMob safely — catches failures on devices without
-        // Google Play Services or with outdated GMS versions.
         try {
             MobileAds.initialize(this) {}
         } catch (e: Exception) {
             Log.w("AdMob", "MobileAds.initialize failed: $e")
         }
-        setContent { TanpuraKingsApp() }
+        setContent { AppRoot() }
+    }
+}
+
+// ------------------------------
+// AppRoot — splash → (ad) → app
+// ------------------------------
+@Composable
+fun AppRoot() {
+    val context = LocalContext.current
+    val activity = context as? Activity
+
+    // false = splash, true = main app
+    var showApp by remember { mutableStateOf(false) }
+
+    if (showApp) {
+        TanpuraKingsApp()
+    } else {
+        SplashScreen(
+            onReady = {
+                // Try to show an interstitial; proceed to app when done (or skipped).
+                if (activity != null) {
+                    InterstitialAdManager.showIfReady(activity, onDismissed = { showApp = true }, ignoreCooldown = true)
+                } else {
+                    showApp = true
+                }
+            }
+        )
+    }
+}
+
+// ------------------------------
+// SplashScreen
+// ------------------------------
+@Composable
+fun SplashScreen(onReady: () -> Unit) {
+    val context = LocalContext.current
+    // Minimum display time so the splash doesn't flash too quickly.
+    val MIN_SPLASH_MS = 2000L
+    // Maximum wait for the ad to load before proceeding without it.
+    val AD_TIMEOUT_MS = 4000L
+
+    LaunchedEffect(Unit) {
+        // Load ad and audio in parallel with the splash.
+        InterstitialAdManager.load(context)
+        val start = System.currentTimeMillis()
+
+        // Wait for the minimum splash duration.
+        delay(MIN_SPLASH_MS)
+
+        // Wait up to AD_TIMEOUT_MS total for an ad to be ready.
+        val waited = System.currentTimeMillis() - start
+        val remaining = (AD_TIMEOUT_MS - waited).coerceAtLeast(0)
+        var elapsed = 0L
+        while (elapsed < remaining && !InterstitialAdManager.isReady) {
+            delay(100)
+            elapsed += 100
+        }
+
+        onReady()
+    }
+
+    // Splash UI — matches the app's visual style.
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color.Blue.copy(alpha = 0.6f), Color(0xFF800080).copy(alpha = 0.8f))
+                )
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Image(
+                painter = painterResource(id = R.drawable.app_logo),
+                contentDescription = "Tanpura Kings",
+                modifier = Modifier.size(120.dp)
+            )
+            Spacer(modifier = Modifier.height(20.dp))
+            Text(
+                text = "Tanpura Kings",
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "by Kingsman Software Solutions",
+                fontSize = 13.sp,
+                color = Color.White.copy(alpha = 0.7f)
+            )
+            Spacer(modifier = Modifier.height(40.dp))
+            CircularProgressIndicator(
+                color = Color(0xFFFFA500),
+                strokeWidth = 3.dp,
+                modifier = Modifier.size(36.dp)
+            )
+        }
     }
 }
 

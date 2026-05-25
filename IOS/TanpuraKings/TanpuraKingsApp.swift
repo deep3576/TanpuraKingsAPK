@@ -4,8 +4,8 @@ import AppTrackingTransparency
 
 @main
 struct TanpuraKingsApp: App {
-    /// Tracks whether we've already shown the ATT prompt this launch.
     @State private var didRequestATT = false
+    @State private var splashDone = false
 
     init() {
         #if DEBUG
@@ -14,33 +14,35 @@ struct TanpuraKingsApp: App {
         ]
         #endif
         MobileAds.shared.start()
-        // Pre-load interstitial immediately — AdMob handles consent
-        // internally and serves non-personalized ads if needed.
+        // Start loading the interstitial immediately so it's ready by the
+        // time the splash finishes.
         InterstitialAdManager.shared.load()
     }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .onReceive(NotificationCenter.default.publisher(
-                    for: UIApplication.didBecomeActiveNotification
-                )) { _ in
+            if splashDone {
+                ContentView()
+                    .onReceive(NotificationCenter.default.publisher(
+                        for: UIApplication.didBecomeActiveNotification
+                    )) { _ in
+                        requestTrackingOnce()
+                    }
+            } else {
+                SplashView {
+                    splashDone = true
+                    // Request ATT after splash — app is fully active by now.
                     requestTrackingOnce()
                 }
+            }
         }
     }
 
-    /// Request ATT permission once per launch. ATT must be requested AFTER
-    /// the app becomes active (Apple requirement). The dialog only shows once
-    /// per install — subsequent calls return the stored status instantly.
     private func requestTrackingOnce() {
         guard !didRequestATT else { return }
         didRequestATT = true
-
-        // Small delay ensures the app is fully active before presenting ATT.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             ATTrackingManager.requestTrackingAuthorization { _ in
-                // Reload interstitial after consent — may get personalized ads now.
                 DispatchQueue.main.async {
                     InterstitialAdManager.shared.load()
                 }
