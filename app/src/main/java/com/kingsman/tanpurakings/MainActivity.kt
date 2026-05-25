@@ -2876,7 +2876,7 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         // Register test device BEFORE initialize so test ads are served during development.
         val requestConfig = RequestConfiguration.Builder()
-            .setTestDeviceIds(listOf("b3521832b95e96a2e53992aa7dcd94cf"))
+            .setTestDeviceIds(listOf("4A7802F2012B2833BAAEADA03EB82BBF")) // Pixel 9
             .build()
         MobileAds.setRequestConfiguration(requestConfig)
         try {
