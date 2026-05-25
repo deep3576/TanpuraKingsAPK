@@ -3000,13 +3000,18 @@ fun AppRoot() {
     val context = LocalContext.current
     val activity = context as? Activity
     val prefs = remember { context.getSharedPreferences("TanpuraKingsPrefs", Context.MODE_PRIVATE) }
+    val isTablet = remember { context.resources.configuration.smallestScreenWidthDp >= 600 }
 
     var splashDone  by remember { mutableStateOf(false) }
     var showOnboarding by remember { mutableStateOf(false) }
     var showApp     by remember { mutableStateOf(false) }
 
     val afterAd = {
-        if (!prefs.getBoolean("hasShownOnboarding", false)) {
+        val hasShownOnboarding = prefs.getBoolean("hasShownOnboarding", false)
+        val hasShownTabletFix = prefs.getBoolean("hasShownOnboarding_tablet_fix", false)
+        val shouldShowOnboarding = if (isTablet) !hasShownTabletFix else !hasShownOnboarding
+
+        if (shouldShowOnboarding) {
             showOnboarding = true
         } else {
             showApp = true
@@ -3017,6 +3022,9 @@ fun AppRoot() {
         showApp        -> TanpuraKingsApp()
         showOnboarding -> OnboardingScreen {
             prefs.edit().putBoolean("hasShownOnboarding", true).apply()
+            if (isTablet) {
+                prefs.edit().putBoolean("hasShownOnboarding_tablet_fix", true).apply()
+            }
             showOnboarding = false
             showApp = true
         }
