@@ -7,6 +7,7 @@ struct TanpuraKingsApp: App {
     @State private var didRequestATT = false
     @State private var splashDone = false
     @AppStorage("hasShownOnboarding") private var hasShownOnboarding: Bool = false
+    @AppStorage("hasShownOnboarding_allDevicesFix") private var hasShownOnboardingAllDevicesFix: Bool = false
 
     init() {
         #if DEBUG
@@ -22,6 +23,7 @@ struct TanpuraKingsApp: App {
         InterstitialAdManager.shared.load()
     }
 
+
     var body: some Scene {
         WindowGroup {
             if !splashDone {
@@ -29,9 +31,10 @@ struct TanpuraKingsApp: App {
                     splashDone = true
                     requestTrackingOnce()
                 }
-            } else if !hasShownOnboarding {
+            } else if !hasShownOnboarding || !hasShownOnboardingAllDevicesFix {
                 OnboardingView {
                     hasShownOnboarding = true
+                    hasShownOnboardingAllDevicesFix = true
                 }
             } else {
                 ContentView()

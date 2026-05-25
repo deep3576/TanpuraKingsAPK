@@ -3006,7 +3006,11 @@ fun AppRoot() {
     var showApp     by remember { mutableStateOf(false) }
 
     val afterAd = {
-        if (!prefs.getBoolean("hasShownOnboarding", false)) {
+        val hasShownOnboarding = prefs.getBoolean("hasShownOnboarding", false)
+        val hasShownOnboardingAllDevicesFix = prefs.getBoolean("hasShownOnboarding_all_devices_fix", false)
+        val shouldShowOnboarding = !hasShownOnboarding || !hasShownOnboardingAllDevicesFix
+
+        if (shouldShowOnboarding) {
             showOnboarding = true
         } else {
             showApp = true
@@ -3017,6 +3021,7 @@ fun AppRoot() {
         showApp        -> TanpuraKingsApp()
         showOnboarding -> OnboardingScreen {
             prefs.edit().putBoolean("hasShownOnboarding", true).apply()
+            prefs.edit().putBoolean("hasShownOnboarding_all_devices_fix", true).apply()
             showOnboarding = false
             showApp = true
         }
