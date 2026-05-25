@@ -30,8 +30,7 @@ struct MetronomePanel: View {
                     .foregroundColor(Color(white: 0.85))
                     .font(.system(size: 13))
             }
-            Slider(value: $bpm, in: 40...240)
-                .tint(Color(red: 1.0, green: 165/255, blue: 0))
+            TappableSlider(value: $bpm, range: 40...240, color: Color(red: 1.0, green: 165/255, blue: 0))
 
             HStack {
                 Button(action: handleTap) {
@@ -57,8 +56,7 @@ struct MetronomePanel: View {
                     .foregroundColor(Color(white: 0.85))
                     .font(.system(size: 13))
             }
-            Slider(value: $volume, in: 0...1)
-                .tint(Color(red: 1.0, green: 165/255, blue: 0))
+            TappableSlider(value: $volume, range: 0...1, color: Color(red: 1.0, green: 165/255, blue: 0))
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)

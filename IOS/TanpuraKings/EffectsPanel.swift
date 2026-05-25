@@ -136,9 +136,59 @@ struct SliderWithLabel: View {
                     .foregroundColor(Color(white: 0.8))
                     .font(.system(size: 13))
             }
-            Slider(value: $value, in: range)
-                .tint(color)
+            TappableSlider(value: $value, range: range, color: color)
         }
         .padding(.vertical, 2)
+    }
+}
+
+/// Slider that responds to taps anywhere on the track, not just the thumb.
+struct TappableSlider: View {
+    @Binding var value: Float
+    let range: ClosedRange<Float>
+    var color: Color = .white
+
+    private let trackH: CGFloat = 4
+    private let thumbD: CGFloat = 22
+
+    private func frac(_ w: CGFloat) -> CGFloat {
+        let usable = w - thumbD
+        guard usable > 0 else { return 0 }
+        return CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound))
+    }
+
+    private func update(_ x: CGFloat, width w: CGFloat) {
+        let usable = w - thumbD
+        guard usable > 0 else { return }
+        let raw = Float((x - thumbD / 2) / usable)
+        value = range.lowerBound + min(max(raw, 0), 1) * (range.upperBound - range.lowerBound)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let f = frac(w)
+            let usable = w - thumbD
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.white.opacity(0.25))
+                    .frame(height: trackH)
+                    .padding(.horizontal, thumbD / 2)
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(color)
+                    .frame(width: thumbD / 2 + usable * f, height: trackH)
+                    .padding(.leading, thumbD / 2)
+                Circle()
+                    .fill(color)
+                    .frame(width: thumbD, height: thumbD)
+                    .shadow(color: .black.opacity(0.3), radius: 2)
+                    .offset(x: usable * f)
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { drag in
+                update(drag.location.x, width: w)
+            })
+        }
+        .frame(height: thumbD)
     }
 }

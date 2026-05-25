@@ -6,6 +6,7 @@ import AppTrackingTransparency
 struct TanpuraKingsApp: App {
     @State private var didRequestATT = false
     @State private var splashDone = false
+    @AppStorage("hasShownOnboarding") private var hasShownOnboarding: Bool = false
 
     init() {
         #if DEBUG
@@ -22,19 +23,22 @@ struct TanpuraKingsApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if splashDone {
+            if !splashDone {
+                SplashView {
+                    splashDone = true
+                    requestTrackingOnce()
+                }
+            } else if !hasShownOnboarding {
+                OnboardingView {
+                    hasShownOnboarding = true
+                }
+            } else {
                 ContentView()
                     .onReceive(NotificationCenter.default.publisher(
                         for: UIApplication.didBecomeActiveNotification
                     )) { _ in
                         requestTrackingOnce()
                     }
-            } else {
-                SplashView {
-                    splashDone = true
-                    // Request ATT after splash — app is fully active by now.
-                    requestTrackingOnce()
-                }
             }
         }
     }

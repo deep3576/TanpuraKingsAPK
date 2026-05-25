@@ -8,8 +8,7 @@ struct MasterVolumeView: View {
             Text("Master Volume")
                 .foregroundColor(.white)
                 .font(.system(size: 18))
-            Slider(value: $masterVolume, in: 0...1)
-                .tint(.blue)
+            TappableSlider(value: $masterVolume, range: 0...1, color: .blue)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)

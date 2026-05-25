@@ -106,11 +106,18 @@ import android.media.MediaRecorder as AndroidMediaRecorder
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresPermission
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.material3.TextButton
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
@@ -2868,29 +2875,158 @@ class MainActivity : ComponentActivity() {
 }
 
 // ------------------------------
+// OnboardingScreen
+// ------------------------------
+private data class OnboardingPage(val emoji: String, val title: String, val description: String)
+
+private val onboardingPages = listOf(
+    OnboardingPage("🎵", "Welcome to Tanpura Kings", "Your professional tanpura drone and chromatic tuner. Let's take a quick tour of everything you can do."),
+    OnboardingPage("🎹", "Play the Drone", "Tap any key on the keyboard to start a continuous drone tone. Tap again to stop it. You can play multiple notes at once."),
+    OnboardingPage("🎼", "Change Octave", "Switch between Lower (−1), Mid (0), and Higher (+1) octaves to match your vocal or instrument range."),
+    OnboardingPage("🔊", "Per-Note Volume", "When notes are playing, individual sliders appear so you can balance each drone note precisely."),
+    OnboardingPage("🥁", "Metronome", "Enable the metronome, set BPM (40–240) with the slider or Tap Tempo, and adjust tick volume independently."),
+    OnboardingPage("✨", "Effects & EQ", "Shape your sound with Reverb, Echo, EQ (Low/Mid/High), Stereo Width, Sub Octave blend, Warmth, and Compression."),
+    OnboardingPage("🎚️", "Master Volume", "The master fader controls the overall output level of all active drone notes together."),
+    OnboardingPage("🎤", "Chromatic Tuner", "Tap the Tuner tab to switch to the chromatic tuner. It listens via your mic and shows pitch on an analog dial."),
+    OnboardingPage("🙏", "You're All Set!", "Enjoy Tanpura Kings. This tour won't appear again — explore every feature at your own pace.")
+)
+
+@Composable
+fun OnboardingScreen(onFinished: () -> Unit) {
+    var currentPage by remember { mutableIntStateOf(0) }
+    val isLast = currentPage == onboardingPages.size - 1
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color(0x991A0A6B), Color(0x99500050))
+                )
+            )
+    ) {
+        // Skip button
+        if (!isLast) {
+            TextButton(
+                onClick = onFinished,
+                modifier = Modifier.align(Alignment.TopEnd).padding(16.dp)
+            ) {
+                Text("Skip", color = Color.White.copy(alpha = 0.7f), fontSize = 16.sp)
+            }
+        }
+
+        // Page content
+        AnimatedContent(
+            targetState = currentPage,
+            transitionSpec = {
+                (slideInHorizontally { it } + fadeIn()).togetherWith(slideOutHorizontally { -it } + fadeOut())
+            },
+            modifier = Modifier.fillMaxSize(),
+            label = "onboardingPage"
+        ) { pageIdx ->
+            val p = onboardingPages[pageIdx]
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(p.emoji, fontSize = 80.sp)
+                Spacer(Modifier.height(24.dp))
+                Text(
+                    p.title,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    p.description,
+                    fontSize = 16.sp,
+                    color = Color.White.copy(alpha = 0.88f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    lineHeight = 24.sp
+                )
+            }
+        }
+
+        // Bottom controls
+        Column(
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 40.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Dot indicators
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                onboardingPages.forEachIndexed { idx, _ ->
+                    Box(
+                        modifier = Modifier
+                            .size(if (idx == currentPage) 10.dp else 7.dp)
+                            .background(
+                                if (idx == currentPage) Color.White else Color.White.copy(alpha = 0.3f),
+                                CircleShape
+                            )
+                    )
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+            // Next / Get Started button
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 32.dp)
+                    .background(Color(0xFFFFA500), RoundedCornerShape(50))
+                    .clickable { if (isLast) onFinished() else currentPage++ }
+                    .padding(vertical = 14.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    if (isLast) "Get Started! 🎵" else "Next  →",
+                    color = Color.Black,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+    }
+}
+
+// ------------------------------
 // AppRoot — splash → (ad) → app
 // ------------------------------
 @Composable
 fun AppRoot() {
     val context = LocalContext.current
     val activity = context as? Activity
+    val prefs = remember { context.getSharedPreferences("TanpuraKingsPrefs", Context.MODE_PRIVATE) }
 
-    // false = splash, true = main app
-    var showApp by remember { mutableStateOf(false) }
+    var splashDone  by remember { mutableStateOf(false) }
+    var showOnboarding by remember { mutableStateOf(false) }
+    var showApp     by remember { mutableStateOf(false) }
 
-    if (showApp) {
-        TanpuraKingsApp()
-    } else {
-        SplashScreen(
-            onReady = {
-                // Try to show an interstitial; proceed to app when done (or skipped).
-                if (activity != null) {
-                    InterstitialAdManager.showIfReady(activity, onDismissed = { showApp = true }, ignoreCooldown = true)
-                } else {
-                    showApp = true
-                }
+    val afterAd = {
+        if (!prefs.getBoolean("hasShownOnboarding", false)) {
+            showOnboarding = true
+        } else {
+            showApp = true
+        }
+    }
+
+    when {
+        showApp        -> TanpuraKingsApp()
+        showOnboarding -> OnboardingScreen {
+            prefs.edit().putBoolean("hasShownOnboarding", true).apply()
+            showOnboarding = false
+            showApp = true
+        }
+        else           -> SplashScreen(onReady = {
+            if (activity != null) {
+                InterstitialAdManager.showIfReady(activity, onDismissed = { afterAd() }, ignoreCooldown = true)
+            } else {
+                afterAd()
             }
-        )
+        })
     }
 }
 

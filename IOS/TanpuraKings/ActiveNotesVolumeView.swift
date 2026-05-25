@@ -15,7 +15,7 @@ struct ActiveNotesVolumeView: View {
                     ForEach(Array(activeNoteVolumes.keys.sorted()), id: \.self) { note in
                         VStack {
                             Text(note).foregroundColor(.white)
-                            Slider(
+                            TappableSlider(
                                 value: Binding(
                                     get: { activeNoteVolumes[note] ?? 1.0 },
                                     set: { v in
@@ -23,9 +23,9 @@ struct ActiveNotesVolumeView: View {
                                         AudioManager.shared.updateNoteVolume(note, noteVolume: v, masterVolume: masterVolume)
                                     }
                                 ),
-                                in: 0...1
+                                range: 0...1,
+                                color: Color(red: 1.0, green: 165/255, blue: 0)
                             )
-                            .tint(Color(red: 1.0, green: 165/255, blue: 0))
                             .frame(width: 150)
                         }
                         .padding(8)
