@@ -107,6 +107,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresPermission
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -2738,73 +2739,155 @@ fun AppRoot() {
 // ------------------------------
 // SplashScreen
 // ------------------------------
+private val loadingStages = listOf(
+    0.15f to "Initializing audio engine...",
+    0.35f to "Loading tanpura samples...",
+    0.55f to "Preparing sound effects...",
+    0.75f to "Tuning strings...",
+    0.90f to "Loading advertisements...",
+    1.00f to "Ready!"
+)
+
 @Composable
 fun SplashScreen(onReady: () -> Unit) {
     val context = LocalContext.current
-    // Minimum display time so the splash doesn't flash too quickly.
-    val MIN_SPLASH_MS = 2000L
-    // Maximum wait for the ad to load before proceeding without it.
-    val AD_TIMEOUT_MS = 4000L
+
+    // Animated progress 0→1
+    var progress by remember { mutableFloatStateOf(0f) }
+    val animatedProgress by animateFloatAsState(
+        targetValue = progress,
+        animationSpec = tween(durationMillis = 400, easing = FastOutSlowInEasing),
+        label = "loadingProgress"
+    )
+    var stageLabel by remember { mutableStateOf(loadingStages.first().second) }
 
     LaunchedEffect(Unit) {
-        // Load ad and audio in parallel with the splash.
         InterstitialAdManager.load(context)
-        val start = System.currentTimeMillis()
 
-        // Wait for the minimum splash duration.
-        delay(MIN_SPLASH_MS)
-
-        // Wait up to AD_TIMEOUT_MS total for an ad to be ready.
-        val waited = System.currentTimeMillis() - start
-        val remaining = (AD_TIMEOUT_MS - waited).coerceAtLeast(0)
-        var elapsed = 0L
-        while (elapsed < remaining && !InterstitialAdManager.isReady) {
-            delay(100)
-            elapsed += 100
+        // Animate through each loading stage
+        for ((target, label) in loadingStages.dropLast(1)) {
+            progress = target
+            stageLabel = label
+            delay(350)
         }
 
+        // Poll for ad ready (up to 2 extra seconds after stages)
+        var waited = 0L
+        while (waited < 2000L && !InterstitialAdManager.isReady) {
+            delay(100); waited += 100
+        }
+
+        // Final step
+        progress = 1f
+        stageLabel = "Ready!"
+        delay(300)
         onReady()
     }
 
-    // Splash UI — matches the app's visual style.
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color.Blue.copy(alpha = 0.6f), Color(0xFF800080).copy(alpha = 0.8f))
-                )
-            ),
+            .background(Color(0xFF0A0A1A)), // deep dark base
         contentAlignment = Alignment.Center
     ) {
+        // Subtle radial glow behind logo
+        Box(
+            modifier = Modifier
+                .size(280.dp)
+                .background(
+                    Brush.radialGradient(
+                        listOf(
+                            Color(0xFF5500AA).copy(alpha = 0.5f),
+                            Color.Transparent
+                        )
+                    )
+                )
+        )
+
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 40.dp)
         ) {
+            Spacer(modifier = Modifier.weight(1f))
+
+            // Logo
             Image(
                 painter = painterResource(id = R.drawable.app_logo),
                 contentDescription = "Tanpura Kings",
-                modifier = Modifier.size(120.dp)
+                modifier = Modifier.size(110.dp)
             )
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Title
             Text(
-                text = "Tanpura Kings",
-                fontSize = 28.sp,
+                text = "TANPURA KINGS",
+                fontSize = 26.sp,
                 fontWeight = FontWeight.Bold,
+                letterSpacing = 4.sp,
                 color = Color.White
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = "by Kingsman Software Solutions",
-                fontSize = 13.sp,
-                color = Color.White.copy(alpha = 0.7f)
+                fontSize = 12.sp,
+                color = Color(0xFFAAAAAA)
             )
-            Spacer(modifier = Modifier.height(40.dp))
-            CircularProgressIndicator(
-                color = Color(0xFFFFA500),
-                strokeWidth = 3.dp,
-                modifier = Modifier.size(36.dp)
-            )
+
+            Spacer(modifier = Modifier.weight(1f))
+
+            // Progress bar section
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Stage label
+                Text(
+                    text = stageLabel,
+                    fontSize = 12.sp,
+                    color = Color(0xFFFFA500),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Start
+                )
+
+                // Track background
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color.White.copy(alpha = 0.1f))
+                ) {
+                    // Filled bar with gradient
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(animatedProgress)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(Color(0xFFFFA500), Color(0xFFFF6600))
+                                )
+                            )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Percentage
+                Text(
+                    text = "${(animatedProgress * 100).toInt()}%",
+                    fontSize = 11.sp,
+                    color = Color(0xFF888888),
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                )
+            }
+
+            Spacer(modifier = Modifier.height(32.dp))
         }
     }
 }

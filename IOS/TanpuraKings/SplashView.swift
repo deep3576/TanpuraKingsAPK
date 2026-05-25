@@ -1,73 +1,109 @@
 import SwiftUI
 
-/// Splash screen shown at launch while the app loads and an interstitial
-/// ad is fetched. Transitions to the main app after the ad is dismissed
-/// (or after a timeout if no ad is available).
+private let loadingStages: [(Float, String)] = [
+    (0.15, "Initializing audio engine..."),
+    (0.35, "Loading tanpura samples..."),
+    (0.55, "Preparing sound effects..."),
+    (0.75, "Tuning strings..."),
+    (0.90, "Loading advertisements..."),
+    (1.00, "Ready!")
+]
+
 struct SplashView: View {
 
-    /// Called once when the splash is done (ad shown+dismissed, or timed out).
     let onFinished: () -> Void
 
-    private let minDisplaySeconds: Double = 2.0
-    private let adTimeoutSeconds:  Double = 4.0
-
-    @State private var dotCount = 0
-    private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+    @State private var progress: Float = 0
+    @State private var stageLabel: String = loadingStages.first!.1
 
     var body: some View {
         ZStack {
-            // Same gradient as the main app.
-            LinearGradient(
+            // Deep dark base
+            Color(red: 0.04, green: 0.04, blue: 0.10)
+                .ignoresSafeArea()
+
+            // Radial glow behind logo
+            RadialGradient(
                 colors: [
-                    Color.blue.opacity(0.6),
-                    Color(red: 0.5, green: 0, blue: 0.5).opacity(0.8)
+                    Color(red: 0.33, green: 0, blue: 0.67).opacity(0.5),
+                    Color.clear
                 ],
-                startPoint: .top,
-                endPoint: .bottom
+                center: .center,
+                startRadius: 0,
+                endRadius: 160
             )
-            .ignoresSafeArea()
+            .frame(width: 320, height: 320)
 
             VStack(spacing: 0) {
                 Spacer()
 
+                // Logo
                 Image("Logo")
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 120, height: 120)
+                    .frame(width: 110, height: 110)
 
-                Spacer().frame(height: 20)
+                Spacer().frame(height: 16)
 
-                Text("Tanpura Kings")
-                    .font(.system(size: 28, weight: .bold))
+                // App name
+                Text("TANPURA KINGS")
+                    .font(.system(size: 26, weight: .bold))
+                    .tracking(4)
                     .foregroundColor(.white)
 
-                Spacer().frame(height: 8)
+                Spacer().frame(height: 4)
 
                 Text("by Kingsman Software Solutions")
-                    .font(.system(size: 13))
-                    .foregroundColor(.white.opacity(0.7))
-
-                Spacer().frame(height: 48)
-
-                // Animated loading indicator
-                HStack(spacing: 8) {
-                    ForEach(0..<3, id: \.self) { i in
-                        Circle()
-                            .fill(Color.orange)
-                            .frame(width: 10, height: 10)
-                            .opacity(dotCount == i ? 1.0 : 0.3)
-                    }
-                }
-                .onReceive(timer) { _ in
-                    dotCount = (dotCount + 1) % 3
-                }
+                    .font(.system(size: 12))
+                    .foregroundColor(Color(white: 0.67))
 
                 Spacer()
 
-                Text("© Kingsman Software Solutions")
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.5))
-                    .padding(.bottom, 24)
+                // Progress bar section
+                VStack(alignment: .leading, spacing: 8) {
+                    // Stage label
+                    Text(stageLabel)
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(red: 1.0, green: 0.65, blue: 0))
+                        .animation(.easeInOut(duration: 0.3), value: stageLabel)
+
+                    // Progress track
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            // Track
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color.white.opacity(0.1))
+                                .frame(height: 6)
+
+                            // Fill
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            Color(red: 1.0, green: 0.65, blue: 0),
+                                            Color(red: 1.0, green: 0.40, blue: 0)
+                                        ],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .frame(width: geo.size.width * CGFloat(progress), height: 6)
+                                .animation(.easeInOut(duration: 0.4), value: progress)
+                        }
+                    }
+                    .frame(height: 6)
+
+                    // Percentage
+                    HStack {
+                        Spacer()
+                        Text("\(Int(progress * 100))%")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(white: 0.53))
+                    }
+                }
+                .padding(.horizontal, 40)
+
+                Spacer().frame(height: 40)
             }
         }
         .task {
@@ -76,24 +112,31 @@ struct SplashView: View {
     }
 
     private func runSplashSequence() async {
-        let start = Date()
-
-        // Wait minimum display time.
-        try? await Task.sleep(nanoseconds: UInt64(minDisplaySeconds * 1_000_000_000))
-
-        // Poll for ad ready up to the timeout.
-        let waited = Date().timeIntervalSince(start)
-        let remaining = max(0, adTimeoutSeconds - waited)
-        let pollInterval: Double = 0.1
-        var elapsed: Double = 0
-        while elapsed < remaining && !InterstitialAdManager.shared.isReady {
-            try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
-            elapsed += pollInterval
+        // Step through each loading stage
+        for (target, label) in loadingStages.dropLast() {
+            await MainActor.run {
+                progress = target
+                stageLabel = label
+            }
+            try? await Task.sleep(nanoseconds: 350_000_000)
         }
+
+        // Poll for ad ready (up to 2 more seconds)
+        var waited: Double = 0
+        while waited < 2.0 && !InterstitialAdManager.shared.isReady {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            waited += 0.1
+        }
+
+        // Final step
+        await MainActor.run {
+            progress = 1.0
+            stageLabel = "Ready!"
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
 
         await MainActor.run {
             if InterstitialAdManager.shared.isReady {
-                // Show ad — onFinished is called from showIfReady's completion.
                 InterstitialAdManager.shared.showIfReady(onDismissed: onFinished, ignoreCooldown: true)
             } else {
                 onFinished()
