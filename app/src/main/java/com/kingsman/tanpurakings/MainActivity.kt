@@ -1033,9 +1033,8 @@ object AudioManager {
                 }
 
                 /**
-                 * Android Auto calls this when the user taps a browse item.
-                 * [mediaId] matches one of the note keys defined in
-                 * [TanpuraMediaBrowserService] ("c", "csharp", …, "b").
+                 * Called when a MediaController requests playback by media ID.
+                 * [mediaId] matches one of the note keys ("c", "csharp", …, "b").
                  */
                 override fun onPlayFromMediaId(mediaId: String?, extras: Bundle?) {
                     val validKeys = listOf(
