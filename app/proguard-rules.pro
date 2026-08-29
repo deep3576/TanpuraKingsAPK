@@ -24,6 +24,5 @@
 -keep class com.google.android.gms.ads.** { *; }
 -keep class com.google.ads.** { *; }
 
-# --- MediaBrowserService (Android Auto / Bluetooth) ---
--keep class com.kingsman.tanpurakings.TanpuraMediaBrowserService { *; }
+# --- Background playback service ---
 -keep class com.kingsman.tanpurakings.AudioPlaybackService { *; }

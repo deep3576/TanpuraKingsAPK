@@ -62,24 +62,6 @@
             </intent-filter>
         </receiver>
 
-        <!-- Android Auto / Bluetooth media-browser service.
-             Android Auto connects here to browse and play drone notes.
-             foregroundServiceType is inherited from AudioPlaybackService;
-             this service only handles browsing (no separate foreground need). -->
-        <service
-            android:name=".TanpuraMediaBrowserService"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.media.browse.MediaBrowserService" />
-            </intent-filter>
-        </service>
-
-        <!-- Tells Android Auto (and Google Play) that this app supports
-             in-car media browsing via the automotive_app_desc descriptor. -->
-        <meta-data
-            android:name="com.google.android.gms.car.application"
-            android:resource="@xml/automotive_app_desc" />
-
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
             android:value="ca-app-pub-3492509358962490~7416061404" />

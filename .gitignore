@@ -9,6 +9,11 @@
 .cxx
 local.properties
 
+# Release signing (never commit)
+keystore.properties
+*.jks
+*.keystore
+
 # IntelliJ / Android Studio
 .idea/caches/
 .idea/libraries/
