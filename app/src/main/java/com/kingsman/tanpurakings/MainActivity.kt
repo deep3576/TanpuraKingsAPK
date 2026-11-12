@@ -7,6 +7,7 @@ import android.graphics.Typeface
 import android.content.Intent
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
+import androidx.media.session.MediaButtonReceiver
 import android.support.v4.media.session.PlaybackStateCompat
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
@@ -101,6 +102,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.pm.PackageManager
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder as AndroidMediaRecorder
@@ -157,6 +163,18 @@ object AudioManager {
     val isPlaying: Boolean get() = activePlayers.isNotEmpty()
     private val loopJobs     = mutableMapOf<String, Job>()
     private val noteVolumes  = mutableMapOf<String, Float>()
+    // Notes whose MediaPlayer is still being prepared. stopNote() removes the
+    // entry so the in-flight playNote() discards its player instead of
+    // installing it (prevents duplicate players / crossfade loops per note).
+    private val pendingNotes = mutableSetOf<String>()
+    // Notes sounding or loading, published so the UI stays in sync when
+    // playback changes outside it (lock screen, headset, focus loss, route change).
+    private val _playingNotes = MutableStateFlow<Set<String>>(emptySet())
+    val playingNotes: StateFlow<Set<String>> = _playingNotes.asStateFlow()
+    private fun publishNotes() { _playingNotes.value = activePlayers.keys + pendingNotes }
+    // True while a route change stops and replays notes, so the foreground
+    // service isn't dropped (restarting it from the background is blocked).
+    private var keepServiceDuringRestart = false
 
     // SoundPool used only for transient echo/delay/reverb copies
     private lateinit var soundPool: SoundPool
@@ -226,11 +244,20 @@ object AudioManager {
     )
     private var octaveLevel: Int = 0  // -1, 0, or +1
 
-    // MediaSession — enables lock-screen / headphone / steering-wheel controls
-    // and is the bridge to Android Auto in Phase 2.
+    // MediaSession — enables lock-screen / headphone controls.
     private var mediaSession: MediaSessionCompat? = null
     /** Exposed so AudioPlaybackService can attach it to the notification style. */
     val mediaSessionToken: MediaSessionCompat.Token? get() = mediaSession?.sessionToken
+
+    /** True while notes are playing, loading, or paused awaiting resume. */
+    val needsPlaybackService: Boolean
+        get() = mediaSession != null &&
+            (activePlayers.isNotEmpty() || pendingNotes.isNotEmpty() || pausedNotesSnapshot.isNotEmpty())
+
+    /** Routes a MEDIA_BUTTON intent (e.g. the notification's Stop action) to the session. */
+    fun handleMediaButtonIntent(intent: Intent?) {
+        mediaSession?.let { MediaButtonReceiver.handleIntent(it, intent) }
+    }
 
     // Metronome
     private var clickSoundId: Int = 0
@@ -334,24 +361,28 @@ object AudioManager {
         }
     }
 
+    private val focusListener =
+        android.media.AudioManager.OnAudioFocusChangeListener { change -> handleAudioFocusChange(change) }
+
     private fun requestAudioFocusInternal() {
         val sys = sysAudioManager ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val attrs = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                .build()
-            val req = AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(attrs)
+            val req = focusRequest ?: AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                )
                 .setAcceptsDelayedFocusGain(true)
-                .setOnAudioFocusChangeListener { change -> handleAudioFocusChange(change) }
+                .setOnAudioFocusChangeListener(focusListener)
                 .build()
             focusRequest = req
             sys.requestAudioFocus(req)
         } else {
             @Suppress("DEPRECATION")
             sys.requestAudioFocus(
-                { change -> handleAudioFocusChange(change) },
+                focusListener,
                 android.media.AudioManager.STREAM_MUSIC,
                 android.media.AudioManager.AUDIOFOCUS_GAIN
             )
@@ -436,7 +467,12 @@ object AudioManager {
 
             // Stop whatever is still live (may be empty if notes were already
             // stopped by AUDIOFOCUS_LOSS when Device B took the speaker).
-            liveSnapshot.forEach { stopNote(it) }
+            keepServiceDuringRestart = true
+            try {
+                liveSnapshot.forEach { stopNote(it) }
+            } finally {
+                keepServiceDuringRestart = false
+            }
             requestAudioFocusInternal()
 
             // Give the OS time to finish the A2DP route handoff.
@@ -610,17 +646,30 @@ object AudioManager {
         }
 
     fun playNote(noteName: String, masterVolume: Float, noteVolume: Float = 1f) {
-        if (activePlayers.size >= MAX_ACTIVE_NOTES) return
+        val scope = coroutineScope ?: return
+        // Already playing or being prepared — a second player would race the first.
+        if (noteName in activePlayers || noteName in pendingNotes) return
+        if (activePlayers.size + pendingNotes.size >= MAX_ACTIVE_NOTES) return
+        // Re-claim focus when starting from silence (it may have been lost permanently).
+        if (activePlayers.isEmpty() && pendingNotes.isEmpty()) requestAudioFocusInternal()
         currentMasterVolume = masterVolume
         val volume  = (masterVolume * noteVolume).coerceIn(0f, 1f)
+        pendingNotes.add(noteName)
+        publishNotes()
 
-        coroutineScope?.launch {
+        scope.launch {
             // Combined pitch: semitone-from-F# × octave × fine-tune.
             val pitch  = pitchRate(noteName)
             // Build the player at zero volume so we can fade in cleanly
             // (avoids a click/pop on tap-on, gives crossfade-feel when this
             // note is replacing another one the user just tapped off).
-            val player = buildPlayer(0f, pitch) ?: return@launch
+            val built = buildPlayer(0f, pitch)
+            // Stopped while preparing — discard instead of playing an orphan.
+            if (!pendingNotes.remove(noteName)) {
+                built?.let { runCatching { it.release() } }
+                return@launch
+            }
+            val player = built ?: run { publishNotes(); return@launch }
 
             player.start()
             activePlayers[noteName] = player
@@ -660,6 +709,11 @@ object AudioManager {
             coroutineScope?.launch {
                 val sp = buildPlayer(subVol, pitchRate(noteName) * 0.5f)
                     ?: return@launch
+                // Note stopped (or already has a companion) while preparing.
+                if (noteName !in activePlayers || noteName in subOctavePlayers) {
+                    runCatching { sp.release() }
+                    return@launch
+                }
                 sp.isLooping = true
                 sp.start()
                 subOctavePlayers[noteName] = sp
@@ -720,8 +774,8 @@ object AudioManager {
                 val stepMs = CROSSFADE_MS / CROSSFADE_STEPS
                 for (step in 1..CROSSFADE_STEPS) {
                     val alpha = step.toFloat() / CROSSFADE_STEPS
-                    curPlayer.setVolume(volume * (1f - alpha), volume * (1f - alpha))
-                    nextPlayer.setVolume(volume * alpha, volume * alpha)
+                    runCatching { curPlayer.setVolume(volume * (1f - alpha), volume * (1f - alpha)) }
+                    runCatching { nextPlayer.setVolume(volume * alpha, volume * alpha) }
                     delay(stepMs)   // CancellationException lands here if job is cancelled
                 }
 
@@ -758,7 +812,11 @@ object AudioManager {
     }
 
     fun stopNote(noteName: String) {
-        val player = activePlayers.remove(noteName) ?: return
+        val player = activePlayers.remove(noteName) ?: run {
+            pendingNotes.remove(noteName)   // cancel an in-flight playNote()
+            publishNotes()
+            return
+        }
         loopJobs.remove(noteName)?.cancel()
         echoJobs.remove(noteName)?.cancel()
         val effects = effectPlayers.remove(noteName)
@@ -782,13 +840,16 @@ object AudioManager {
         updateMediaSession()
         // Stop the foreground service once the last note is gone so the
         // persistent notification is dismissed.
-        if (activePlayers.isEmpty()) stopPlaybackService()
+        if (activePlayers.isEmpty() && pendingNotes.isEmpty() && !keepServiceDuringRestart) {
+            stopPlaybackService()
+        }
         // Re-spread the remaining notes immediately so their pan rebalances
         // as soon as the user taps off — no need to wait for the fade to finish.
         reapplyStereoSpread()
     }
 
     fun stopAllNotes() {
+        pendingNotes.clear()
         loopJobs.values.forEach { it.cancel() };  loopJobs.clear()
         echoJobs.values.forEach { it.cancel() };  echoJobs.clear()
 
@@ -1002,12 +1063,10 @@ object AudioManager {
                     stopAllNotes()
                 }
 
-                /** Stop: same as pause for a drone — snapshot then stop. */
+                /** Stop: end playback fully so the foreground notification is dismissed. */
                 override fun onStop() {
-                    if (activePlayers.isNotEmpty()) {
-                        pausedNotesSnapshot = HashMap(noteVolumes)
-                        pausedForFocus = false
-                    }
+                    pausedNotesSnapshot = emptyMap()
+                    pausedForFocus = false
                     stopAllNotes()
                 }
 
@@ -1062,6 +1121,7 @@ object AudioManager {
      * current set of active notes. Call this whenever notes are added or removed.
      */
     private fun updateMediaSession() {
+        publishNotes()
         val session   = mediaSession ?: return
         val isPlaying = activePlayers.isNotEmpty()
         val hasPause  = pausedNotesSnapshot.isNotEmpty()
@@ -1122,6 +1182,7 @@ object AudioManager {
             val intent = Intent(ctx, AudioPlaybackService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 ctx.startForegroundService(intent)
+                AudioPlaybackService.startPending = true
             } else {
                 ctx.startService(intent)
             }
@@ -1141,11 +1202,18 @@ object AudioManager {
      */
     private fun stopPlaybackService() {
         val ctx = appContext ?: return
+        // A start is still in flight: stopping now would crash. The service
+        // checks needsPlaybackService in onStartCommand and stops itself.
+        if (AudioPlaybackService.startPending) return
         ctx.stopService(Intent(ctx, AudioPlaybackService::class.java))
     }
 
     fun release() {
         stopMetronome()
+        // Engine is going away — drop any paused snapshot so stopAllNotes()
+        // also stops the foreground service (no stale "playing" notification).
+        pausedNotesSnapshot = emptyMap()
+        pausedForFocus = false
         stopAllNotes()
         subOctavePlayers.values.forEach { sp -> runCatching { sp.stop() }; sp.release() }
         subOctavePlayers.clear()
@@ -1164,7 +1232,7 @@ object AudioManager {
             focusRequest = null
         } else {
             @Suppress("DEPRECATION")
-            sysAudioManager?.abandonAudioFocus(null)
+            sysAudioManager?.abandonAudioFocus(focusListener)
         }
         sysAudioManager = null
 
@@ -1219,36 +1287,54 @@ object TunerManager {
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT
         )
         val bufSize = maxOf(minBuf, FRAME_SIZE * 4)
-        val record  = AudioRecord(
-            AndroidMediaRecorder.AudioSource.MIC,
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_FLOAT,
-            bufSize
-        )
+        // AudioRecord's constructor and startRecording() can throw when the
+        // mic is unavailable (in use, restricted by policy, bad buffer size).
+        val record = try {
+            AudioRecord(
+                AndroidMediaRecorder.AudioSource.MIC,
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_FLOAT,
+                bufSize
+            )
+        } catch (e: Exception) {
+            Log.e("TunerManager", "AudioRecord create failed: $e")
+            return
+        }
         if (record.state != AudioRecord.STATE_INITIALIZED) {
             record.release()
             Log.e("TunerManager", "AudioRecord init failed")
             return
         }
+        try {
+            record.startRecording()
+        } catch (e: Exception) {
+            record.release()
+            Log.e("TunerManager", "AudioRecord start failed: $e")
+            return
+        }
         audioRecord = record
-        record.startRecording()
         _isListening.value = true
 
         processingJob = scope.launch {
-            val buf = FloatArray(FRAME_SIZE)
-            while (isActive) {
-                val read = record.read(buf, 0, FRAME_SIZE, AudioRecord.READ_BLOCKING)
-                if (read > 0) process(buf, read)
+            // Release on this thread only after read() has returned — releasing
+            // from the main thread mid-read is unsafe on some audio HALs.
+            try {
+                val buf = FloatArray(FRAME_SIZE)
+                while (isActive) {
+                    val read = record.read(buf, 0, FRAME_SIZE, AudioRecord.READ_BLOCKING)
+                    if (read > 0 && isActive) process(buf, read)
+                }
+            } finally {
+                runCatching { record.stop() }
+                record.release()
             }
         }
     }
 
     fun stop() {
-        processingJob?.cancel()
+        processingJob?.cancel()   // the job's finally stops + releases the AudioRecord
         processingJob = null
-        audioRecord?.stop()
-        audioRecord?.release()
         audioRecord         = null
         _isListening.value  = false
         _detected.value     = false
@@ -2040,6 +2126,28 @@ fun TunerScreen() {
 
     LaunchedEffect(Unit) { launcher.launch(Manifest.permission.RECORD_AUDIO) }
 
+    // Never keep the mic open while the app is in the background.
+    val tunerContext = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP  -> TunerManager.stop()
+                Lifecycle.Event.ON_START -> {
+                    @SuppressLint("MissingPermission")  // checked on the same line
+                    if (ContextCompat.checkSelfPermission(tunerContext, Manifest.permission.RECORD_AUDIO)
+                        == PackageManager.PERMISSION_GRANTED) TunerManager.start()
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            TunerManager.stop()
+        }
+    }
+
     val inTune  = detected && abs(cents) < 5f
     val isFlat  = detected && cents < -5f
     val isSharp = detected && cents >  5f
@@ -2390,7 +2498,17 @@ object InterstitialAdManager {
                     load(activity)
                 }
             }
-            ad.show(activity)
+            if (activity.isFinishing || activity.isDestroyed) {
+                onDismissed()
+                return
+            }
+            try {
+                ad.show(activity)
+            } catch (e: Exception) {
+                Log.w("AdMob", "Interstitial show failed: $e")
+                interstitialAd = null
+                onDismissed()
+            }
         } else {
             onDismissed()
             load(activity)
@@ -2432,6 +2550,17 @@ fun TanpuraKingsApp() {
 
     val activeNotes      = remember { mutableStateOf(setOf<String>()) }
     val activeNoteVolumes = remember { mutableStateOf(mapOf<String, Float>()) }
+    // Follow the engine when playback changes outside the UI (lock screen
+    // Stop, headset, phone call, Bluetooth route change).
+    LaunchedEffect(Unit) {
+        AudioManager.playingNotes.collect { engineNotes ->
+            if (engineNotes != activeNotes.value) {
+                val vols = activeNoteVolumes.value
+                activeNotes.value = engineNotes
+                activeNoteVolumes.value = engineNotes.associateWith { vols[it] ?: 1f }
+            }
+        }
+    }
     val masterVolume = remember { mutableFloatStateOf(1f) }
     val reverb       = remember { mutableFloatStateOf(0f) }
     val fineTune     = remember { mutableFloatStateOf(0f) }
@@ -2599,14 +2728,12 @@ fun TanpuraKingsApp() {
 private val tunerLoadingStages = listOf(
     0.25f to "Stopping drone...",
     0.55f to "Starting microphone...",
-    0.80f to "Loading advertisement...",
     1.00f to "Ready!"
 )
 
 private val droneLoadingStages = listOf(
     0.25f to "Stopping tuner...",
     0.55f to "Initializing drone...",
-    0.80f to "Loading advertisement...",
     1.00f to "Ready!"
 )
 
@@ -2648,7 +2775,7 @@ fun TabTransitionScreen(
         delay(200)
 
         if (activity != null && InterstitialAdManager.isReady) {
-            InterstitialAdManager.showIfReady(activity, onDismissed = { onReady() }, ignoreCooldown = true)
+            InterstitialAdManager.showIfReady(activity, onDismissed = { onReady() })
         } else {
             onReady()
         }
@@ -3039,13 +3166,8 @@ fun AppRoot() {
             showOnboarding = false
             showApp = true
         }
-        else           -> SplashScreen(onReady = {
-            if (activity != null) {
-                InterstitialAdManager.showIfReady(activity, onDismissed = { afterAd() }, ignoreCooldown = true)
-            } else {
-                afterAd()
-            }
-        })
+        // No interstitial at launch — AdMob policy disallows ads on app open.
+        else           -> SplashScreen(onReady = { afterAd() })
     }
 }
 
@@ -3057,7 +3179,6 @@ private val loadingStages = listOf(
     0.35f to "Loading tanpura samples...",
     0.55f to "Preparing sound effects...",
     0.75f to "Tuning strings...",
-    0.90f to "Loading advertisements...",
     1.00f to "Ready!"
 )
 
@@ -3082,12 +3203,6 @@ fun SplashScreen(onReady: () -> Unit) {
             progress = target
             stageLabel = label
             delay(350)
-        }
-
-        // Poll for ad ready (up to 2 extra seconds after stages)
-        var waited = 0L
-        while (waited < 2000L && !InterstitialAdManager.isReady) {
-            delay(100); waited += 100
         }
 
         // Final step

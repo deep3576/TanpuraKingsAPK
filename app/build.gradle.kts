@@ -21,8 +21,8 @@ android {
         applicationId = "com.kingsman.tanpurakings"
         minSdk = 24
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -58,6 +58,11 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+    lint {
+        // These Compose lint checks crash on Kotlin metadata with the current
+        // AGP/Compose combo ("InconsistentKotlinMetadataException").
+        disable += setOf("CoroutineCreationDuringComposition", "FlowOperatorInvokedInComposition")
     }
 }
 

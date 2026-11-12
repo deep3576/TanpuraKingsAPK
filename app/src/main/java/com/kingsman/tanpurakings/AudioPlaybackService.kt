@@ -24,8 +24,7 @@ import androidx.media.session.MediaButtonReceiver
  *
  * The notification now uses [MediaNotificationCompat.MediaStyle] which:
  *   • Shows the now-playing card on the lock screen.
- *   • Wires up the Stop action so it appears on the lock screen and in
- *     Android Auto's media panel (Phase 2 prerequisite).
+ *   • Wires up the Stop action so it appears on the lock screen.
  *   • Routes hardware media-button events through the MediaSession.
  */
 class AudioPlaybackService : Service() {
@@ -33,22 +32,38 @@ class AudioPlaybackService : Service() {
     companion object {
         const val CHANNEL_ID      = "tanpura_playback_channel"
         const val NOTIFICATION_ID = 101
+
+        /**
+         * True between startForegroundService() and this service's
+         * onStartCommand(). Calling stopService() in that window crashes with
+         * ForegroundServiceDidNotStartInTimeException, so AudioManager skips
+         * stopService() and the service stops itself once it is running.
+         * Only touched on the main thread.
+         */
+        var startPending = false
     }
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // Enter the foreground immediately: if stopService() races ahead of
+        // onStartCommand() (note toggled on/off quickly), Android 12+ throws
+        // ForegroundServiceDidNotStartInTimeException unless startForeground()
+        // was already called.
+        startForeground(NOTIFICATION_ID, buildNotification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Let MediaButtonReceiver route any incoming media-button intent to
-        // the MediaSession before we handle it ourselves.
-        MediaButtonReceiver.handleIntent(AudioManager.mediaSessionToken?.let {
-            // We only need this for routing — the session itself lives in AudioManager.
-            null
-        }, intent)
-
+        // Always satisfy the startForegroundService() contract first.
         startForeground(NOTIFICATION_ID, buildNotification())
+        startPending = false
+
+        // Route media-button intents (notification Stop, headset) to the session.
+        AudioManager.handleMediaButtonIntent(intent)
+
+        // Nothing playing (note stopped before we started, or a headset button
+        // woke a dead process) — don't leave a stale notification behind.
+        if (!AudioManager.needsPlaybackService) stopSelf(startId)
         return START_NOT_STICKY
     }
 
