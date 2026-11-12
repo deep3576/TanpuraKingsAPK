@@ -32,7 +32,10 @@
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:theme="@style/Theme.TanpuraKings">
+            android:theme="@style/Theme.TanpuraKings"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|uiMode|locale|layoutDirection|density|fontScale|keyboard|keyboardHidden|navigation">
+            <!-- Compose re-lays out on these changes itself; recreating the
+                 Activity would release the audio engine and stop the drone. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
